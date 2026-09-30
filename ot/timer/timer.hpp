@@ -18,6 +18,7 @@
 #include <ot/verilog/verilog.hpp>
 #include <ot/sdc/sdc.hpp>
 #include <ot/tau/tau15.hpp>
+#include <ot/timer/gradient.hpp>
 
 namespace ot {
 
@@ -66,6 +67,7 @@ class Timer {
 
     // Action.
     void update_timing();
+    GradientReport report_gradients(const GradientOptions&);
 
     std::optional<float> report_at(const std::string&, Split, Tran);
     std::optional<float> report_rat(const std::string&, Split, Tran);
@@ -128,6 +130,26 @@ class Timer {
     inline const auto& arcs() const;
 
   private:
+
+    using GradientPinData = TimingData<
+      std::optional<double>, MAX_SPLIT, MAX_TRAN
+    >;
+
+    using GradientArcData = TimingData<
+      std::optional<double>, MAX_SPLIT, MAX_TRAN, MAX_TRAN
+    >;
+
+    struct GradientContext {
+      explicit GradientContext(const GradientOptions& o) : options {o} {}
+
+      const GradientOptions& options;
+      std::vector<GradientPinData> smooth_arrivals;
+      std::vector<GradientPinData> pin_adjoints;
+      std::vector<GradientArcData> reduction_weights;
+      std::vector<GradientArcData> arc_gradients;
+      std::optional<double> objective_value;
+      GradientReport report;
+    };
 
     mutable std::shared_mutex _mutex;
 
@@ -198,7 +220,7 @@ class Timer {
     void _add_to_lineage(tf::Task);
     void _rebase_unit(Celllib&);
     void _rebase_unit(spef::Spef&);
-    void _update_timing();
+    void _update_timing(GradientContext* = nullptr);
     void _update_endpoints();
     void _update_area();
     void _update_power();
@@ -206,12 +228,15 @@ class Timer {
     void _fprop_slew(Pin&);
     void _fprop_delay(Pin&);
     void _fprop_at(Pin&);
+    void _smooth_fprop_at(Pin&, GradientContext&);
+    void _seed_gradient_objective(GradientContext&);
     void _fprop_test(Pin&);
     void _bprop_rat(Pin&);
+    void _gradient_bprop_rat(Pin&, GradientContext&);
     void _build_prop_cands();
     void _build_fprop_cands(Pin&);
     void _build_bprop_cands(Pin&);
-    void _build_prop_tasks();
+    void _build_prop_tasks(GradientContext* = nullptr);
     void _clear_prop_tasks();
     void _read_spef(spef::Spef&);;
     void _verilog(vlog::Module&);
@@ -514,7 +539,3 @@ inline auto Timer::_remove_state(int s) {
 };  // end of namespace ot ------------------------------------------------------------------------
 
 #endif
-
-
-
-

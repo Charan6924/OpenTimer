@@ -769,6 +769,174 @@ void Timer::_fprop_delay(Pin& pin) {
   }
 }
 
+void Timer::_smooth_fprop_at(Pin& pin, GradientContext& context){
+  // Clear this pin's smooth arrivals
+  auto& arrivals = context.smooth_arrivals[pin.idx()];
+  arrivals = {};
+
+  // Temperature
+  const double tau = context.options.arrival_temperature;
+
+  // Arrival candidate and its arc/transition
+  struct Candidate {
+    double value;
+    Arc* arc;
+    Tran from_transition;
+  };
+
+  FOR_EACH_EL_RF(el, trf) {
+    std::vector<Candidate> candidates;
+
+    // Include an externally supplied primary-input arrival as a fixed candidate
+    if(auto pi = pin.primary_input(); pi && pi->_at[el][trf]) {
+      candidates.push_back({*pi->_at[el][trf], nullptr, trf});
+    }
+
+    // Clear old weights and exclude arcs removed from propagation by loop breaking.
+    for(auto arc : pin._fanin) {
+      auto& weights = context.reduction_weights[arc->idx()];
+      FOR_EACH_RF(frf) {
+        weights[el][frf][trf].reset();
+        if(arc->is_loop_breaker()) {
+          continue;
+        }
+        const auto& source = context.smooth_arrivals[arc->_from.idx()][el][frf];
+        const auto& delay = arc->_delay[el][frf][trf];
+        if(source && delay) {
+          candidates.push_back({*source + *delay, arc, frf});
+        }
+      }
+    }
+
+    if(candidates.empty()) {
+      continue;
+    }
+
+    // Find largest value for subtraction later
+    const double sign = (el == MAX) ? 1.0 : -1.0;
+    double largest = -std::numeric_limits<double>::infinity();
+    for(const auto& candidate : candidates) {
+      largest = std::max(largest, sign * candidate.value);
+    }
+
+    // Sum up exponentials
+    double sum = 0.0;
+    for(const auto& candidate : candidates) {
+      sum += std::exp((sign * candidate.value - largest) / tau);
+    }
+    // Store max/min value
+    arrivals[el][trf] = sign * (largest + tau * std::log(sum));
+
+    // Store local derivative for later use
+    for(const auto& candidate : candidates) {
+      if(candidate.arc) {
+        context.reduction_weights[candidate.arc->idx()][el]
+          [candidate.from_transition][trf] =
+            std::exp((sign * candidate.value - largest) / tau) / sum;
+      }
+    }
+  }
+}
+
+void Timer::_seed_gradient_objective(GradientContext& context) {
+  struct EndpointSeed {
+    double slack;
+    size_t data_pin;
+    Split split;
+    Tran transition;
+    Pin* clock_pin;
+    Tran clock_transition;
+  };
+
+  // vector of endpoint pins
+  std::vector<EndpointSeed> endpoints;
+  context.objective_value.reset();
+  context.pin_adjoints.assign(_idx2pin.size(), {});
+
+  FOR_EACH_EL_RF(el, rf) {
+    // edge case
+    if((context.options.split && *context.options.split != el) ||
+       (context.options.transition && *context.options.transition != rf)) {
+      continue;
+    }
+
+    // calculate endpoint slack
+    // min = arrival - rat, max = rat - arrival
+    for(const auto& entry : _pos) {
+      const auto& po = entry.second;
+      const auto& arrival = context.smooth_arrivals[po._pin.idx()][el][rf];
+      if(arrival && po._rat[el][rf]) {
+        const double slack = el == MIN ? *arrival - *po._rat[el][rf]
+                                      : *po._rat[el][rf] - *arrival;
+        endpoints.push_back({slack, po._pin.idx(), el, rf, nullptr, RISE});
+      }
+    }
+
+
+    for(const auto& test : _tests) {
+      const auto tv = test._arc.timing_view();
+      if(_clocks.empty() || !tv[el] || !test._constraint[el][rf]) continue;
+
+      const Tran crf = tv[el]->is_rising_edge_triggered() ? RISE : FALL;
+      if(crf == FALL && !tv[el]->is_falling_edge_triggered()) continue;
+
+      const Split cel = el == MIN ? MAX : MIN;
+      auto& clock_pin = test._arc._from;
+      auto& data_pin = test._arc._to;
+      const auto& clock = context.smooth_arrivals[clock_pin.idx()][cel][crf];
+      const auto& data = context.smooth_arrivals[data_pin.idx()][el][rf];
+
+      if(!clock || !data) continue;
+      // Match the existing test calculation's single-clock assumption.
+      const double required = el == MIN
+        ? *clock + *test._constraint[el][rf]
+        : *clock + _clocks.begin()->second.period() - *test._constraint[el][rf];
+      endpoints.push_back({el == MIN ? *data - required : required - *data,
+                           data_pin.idx(), el, rf, &clock_pin, crf});
+    }
+  }
+  if(endpoints.empty()) {
+    context.report.objective_value.reset();
+    return;
+  }
+
+  double worst = std::numeric_limits<double>::infinity();
+  for(const auto& endpoint : endpoints) worst = std::min(worst, endpoint.slack);
+  const double tau = context.options.objective_temperature;
+  double sum = 0.0;
+
+  // find wns
+  if(context.options.objective == TimingObjective::WNS) {
+    for(const auto& endpoint : endpoints) sum += std::exp((worst - endpoint.slack) / tau);
+    context.objective_value = worst - tau * std::log(sum);
+  }
+  else { // find tns
+    double tns = 0.0;
+    for(const auto& endpoint : endpoints) tns += std::min(endpoint.slack, 0.0);
+    context.objective_value = tns;
+  }
+
+  // store local derivative for later use
+  auto seed = [&context](size_t pin, Split el, Tran rf, double value) {
+    auto& adjoint = context.pin_adjoints[pin][el][rf];
+    adjoint = adjoint.value_or(0.0) + value;
+  };
+
+  for(const auto& endpoint : endpoints) {
+    const double q = context.options.objective == TimingObjective::WNS
+      ? std::exp((worst - endpoint.slack) / tau) / sum
+      : (endpoint.slack < 0.0 ? 1.0 : 0.0);
+
+    const double data_seed = endpoint.split == MIN ? q : -q;
+    seed(endpoint.data_pin, endpoint.split, endpoint.transition, data_seed);
+    if(endpoint.clock_pin) {
+      seed(endpoint.clock_pin->idx(), endpoint.split == MIN ? MAX : MIN,
+           endpoint.clock_transition, -data_seed);
+    }
+  }
+  context.report.objective_value = context.objective_value;
+}
+
 // Procedure: _fprop_at
 void Timer::_fprop_at(Pin& pin) {
   
@@ -846,6 +1014,42 @@ void Timer::_bprop_rat(Pin& pin) {
   }
 }
 
+void Timer::_gradient_bprop_rat(Pin& pin, GradientContext& context){
+  auto& adjoints = context.pin_adjoints[pin.idx()];
+
+  // Gather completed downstream contributions; each arc gradient is also
+  // its source-arrival contribution because candidate = source arrival + delay.
+  FOR_EACH_EL_RF(el, frf) {
+    if(!context.smooth_arrivals[pin.idx()][el][frf]) {
+      adjoints[el][frf].reset();
+      continue;
+    }
+    double value = adjoints[el][frf].value_or(0.0);
+    for(auto arc : pin._fanout) {
+      if(arc->is_loop_breaker()) continue;
+      FOR_EACH_RF(trf) {
+        value += context.arc_gradients[arc->idx()][el][frf][trf].value_or(0.0);
+      }
+    }
+    adjoints[el][frf] = value;
+  }
+
+  // Each destination owns its incoming arc gradients. Upstream pin tasks
+  // gather these values later, avoiding concurrent writes to pin adjoints.
+  for(auto arc : pin._fanin) {
+    auto& gradients = context.arc_gradients[arc->idx()];
+    FOR_EACH_EL_RF_RF(el, frf, trf) {
+      if(!arc->_delay[el][frf][trf]) {
+        gradients[el][frf][trf].reset();
+        continue;
+      }
+      const auto& weight = context.reduction_weights[arc->idx()][el][frf][trf];
+      gradients[el][frf][trf] = !arc->is_loop_breaker() && weight && adjoints[el][trf]
+        ? *weight * *adjoints[el][trf] : 0.0;
+    }
+  }
+}
+
 // Procedure: _build_fprop_cands
 // Performs DFS to find all nodes in the fanout cone of frontiers.
 void Timer::_build_fprop_cands(Pin& from) {
@@ -858,7 +1062,7 @@ void Timer::_build_fprop_cands(Pin& from) {
     if(auto& to = arc->_to; !to._has_state(Pin::FPROP_CAND)) {
       _build_fprop_cands(to);
     }
-    else if(to._has_state(Pin::IN_FPROP_STACK)) {
+    else if(to._has_state(Pin::IN_FPROP_STACK)) { // We have a cycle
       _scc_analysis = true;
     }
   }
@@ -926,7 +1130,7 @@ void Timer::_build_prop_cands() {
 }
 
 // Procedure: _build_prop_tasks
-void Timer::_build_prop_tasks() {
+void Timer::_build_prop_tasks(GradientContext* gradient_context) {
   
   // explore propagation candidates
   _build_prop_cands();
@@ -938,12 +1142,16 @@ void Timer::_build_prop_tasks() {
   // (4) propagate the arrival time.
   for(auto pin : _fprop_cands) {
     assert(!pin->_ftask);
-    pin->_ftask = _taskflow.emplace([this, pin] () {
+    pin->_ftask = _taskflow.emplace([this, pin, gradient_context] () {
       _fprop_rc_timing(*pin);
       _fprop_slew(*pin);
       _fprop_delay(*pin);
+      // Refresh exact state so subsequent ordinary reports remain valid.
       _fprop_at(*pin);
       _fprop_test(*pin);
+      if(gradient_context) {
+        _smooth_fprop_at(*pin, *gradient_context);
+      }
     });
   }
   
@@ -959,13 +1167,34 @@ void Timer::_build_prop_tasks() {
     }
   }
 
+  // Fwd prop precedes objective task
+  std::optional<tf::Task> objective_task;
+  if(gradient_context) {
+    objective_task = _taskflow.emplace([this, gradient_context]() {
+      _seed_gradient_objective(*gradient_context);
+    });
+    for(auto pin : _fprop_cands) {
+      pin->_ftask->precede(*objective_task);
+    }
+  }
+
   // Emplace the bprop task
   // (1) propagate the required arrival time
   for(auto pin : _bprop_cands) {
     assert(!pin->_btask);
-    pin->_btask = _taskflow.emplace([this, pin] () {
-      _bprop_rat(*pin);
-    });
+    if (!gradient_context){
+      pin->_btask = _taskflow.emplace([this, pin] () {
+        _bprop_rat(*pin);
+      });
+    } else{
+      pin->_btask = _taskflow.emplace([this, pin, gradient_context] () {
+        // Keep exact required times current alongside the gradient state.
+        _bprop_rat(*pin);
+        _gradient_bprop_rat(*pin, *gradient_context);
+      });
+
+      objective_task->precede(*pin->_btask);
+    }
   }
 
   // Build the task dependencies.
@@ -1013,10 +1242,11 @@ void Timer::update_timing() {
 }
 
 // Function: _update_timing
-void Timer::_update_timing() {
+void Timer::_update_timing(GradientContext* gradient_context) {
+
   
   // Timing is update-to-date
-  if(!_lineage) {
+  if(!_lineage && !gradient_context){
     assert(_frontiers.size() == 0);
     return;
   }
@@ -1025,14 +1255,21 @@ void Timer::_update_timing() {
   _executor.run(_taskflow).wait();
   _taskflow.clear();
   _lineage.reset();
-  
+
   // Check if full update is required
-  if(_has_state(FULL_TIMING)) {
+  if(gradient_context) {
+    gradient_context->smooth_arrivals.resize(_idx2pin.size());
+    gradient_context->pin_adjoints.resize(_idx2pin.size());
+    gradient_context->reduction_weights.resize(_idx2arc.size());
+    gradient_context->arc_gradients.resize(_idx2arc.size());
+  }
+
+  if(_has_state(FULL_TIMING) || gradient_context) {
     _insert_full_timing_frontiers();
   }
 
   // build propagation tasks
-  _build_prop_tasks();
+  _build_prop_tasks(gradient_context);
 
   // debug the graph
   //_taskflow.dump(std::cout);
@@ -1289,7 +1526,7 @@ void Timer::_enable_full_timing_update() {
 // Procedure: _insert_full_timing_frontiers
 void Timer::_insert_full_timing_frontiers() {
 
-  // insert all zero-fanin pins to the frontier list
+  // Add every pin to _frontiers to perform a full recalculation
   for(auto& kvp : _pins) {
     _insert_frontier(kvp.second);
   }
@@ -1538,9 +1775,47 @@ void Timer::_set_load(PrimaryOutput& po, Split m, Tran t, std::optional<float> v
   _insert_frontier(po._pin);
 }
 
+GradientReport Timer::report_gradients(const GradientOptions& options){
+  std::scoped_lock lock(_mutex);
+  // Make sure tau is positive
+  if (!std::isfinite(options.arrival_temperature) || options.arrival_temperature <= 0.0){
+    throw std::invalid_argument("arrival temperature must be finite and greater than zero");
+  }
+
+  if (!std::isfinite(options.objective_temperature) || options.objective_temperature <= 0.0){
+    throw std::invalid_argument("objective temperature must be finite and greater than zero");
+  }
+
+  GradientContext context {options};
+
+  context.report.objective = options.objective;
+  context.report.split = options.split;
+  context.report.transition = options.transition;
+  context.report.arrival_temperature = options.arrival_temperature;
+  context.report.objective_temperature = options.objective_temperature;
+
+  // Run pending timing updates. Gradient tasks will be selected here.
+  _update_timing(&context);
+
+  // Reject cppr for now
+  if (_cppr_analysis){
+    throw std::runtime_error("CPPR does not work for now");
+  }
+
+  // Copy owned arc records so the report remains valid after later circuit edits.
+  context.report.arcs.reserve(_arcs.size());
+  for(const auto& arc : _arcs) {
+    ArcDelayGradient gradient;
+    gradient.arc_id = arc.idx();
+    gradient.kind = arc.is_net_arc() ? TimingArcKind::NET : TimingArcKind::CELL;
+    gradient.from_pin = arc.from().name();
+    gradient.to_pin = arc.to().name();
+    if(context.objective_value) {
+      gradient.value = context.arc_gradients[arc.idx()];
+    }
+    context.report.arcs.push_back(std::move(gradient));
+  }
+  return std::move(context.report);
+}
 
 };  // end of namespace ot. -----------------------------------------------------------------------
-
-
-
-
