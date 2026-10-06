@@ -369,6 +369,11 @@ add_test(it.shell.aes_core ${OT_SHELL_CHECKER} ${OT_SHELL} ${OT_BENCHMARK_DIR} a
 add_test(it.shell.des_perf ${OT_SHELL_CHECKER} ${OT_SHELL} ${OT_BENCHMARK_DIR} des_perf)
 add_test(it.shell.vga_lcd ${OT_SHELL_CHECKER} ${OT_SHELL} ${OT_BENCHMARK_DIR} vga_lcd)
 
-
+# greedy gate sizer
+set(OT_SIZER ${PROJECT_SOURCE_DIR}/bin/ot-sizer)
+add_executable(ot-sizer main/sizer/greedy_sizer.cpp)
+target_link_libraries(ot-sizer ${OT_LINK_FLAGS})
+set_target_properties(ot-sizer PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/bin)
+message(STATUS "OpenTimer sizer: ${OT_SIZER}")
 
 
