@@ -146,6 +146,7 @@ set(OT_CPP
   ot/timer/celllibs.cpp
   ot/timer/test.cpp
   ot/timer/timer.cpp
+  ot/timer/gradient.cpp
   ot/timer/clock.cpp
   ot/timer/sdc.cpp
   ot/timer/endpoint.cpp

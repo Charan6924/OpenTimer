@@ -3,6 +3,7 @@
 
 #include <ot/spef/spef.hpp>
 #include <ot/timer/pin.hpp>
+#include <ot/timer/gradient_context.hpp>
 #include <ot/traits.hpp>
 
 namespace ot {
@@ -11,6 +12,7 @@ namespace ot {
 class RctEdge;
 class RctNode;
 class Rct;
+struct GradientContext;
 
 // ------------------------------------------------------------------------------------------------
 
@@ -28,7 +30,7 @@ class RctNode {
 
     float load (Split, Tran) const;
     float cap  (Split, Tran) const;
-    float slew (Split, Tran, float) const;
+    float slew (Split, Tran, float, GradientContext* context = nullptr) const;
     float delay(Split, Tran) const;
 
   private:
@@ -97,13 +99,13 @@ class Rct {
 
   public:
 
-    void update_rc_timing();
+    void update_rc_timing(GradientContext* context = nullptr);
     void insert_segment(const std::string&, const std::string&, float);
     void insert_node(const std::string&, float = 0.0f);
     void insert_edge(const std::string&, const std::string&, float);
     
     float total_ncap() const;
-    float slew(const std::string&, Split, Tran, float) const;
+    float slew(const std::string&, Split, Tran, float, GradientContext* context = nullptr) const;
     float delay(const std::string&, Split, Tran) const;
 
     inline size_t num_nodes() const;
@@ -118,14 +120,17 @@ class Rct {
     std::unordered_map<std::string, RctNode> _nodes;
     std::list<RctEdge> _edges;
 
-    void _update_load(RctNode*, RctNode*);
-    void _update_delay(RctNode*, RctNode*);
-    void _update_ldelay(RctNode*, RctNode*);
-    void _update_response(RctNode*, RctNode*);
+    void _update_load(RctNode*, RctNode*, GradientContext* context = nullptr);
+    void _update_delay(RctNode*, RctNode*, GradientContext* context = nullptr);
+    void _update_ldelay(RctNode*, RctNode*, GradientContext* context = nullptr);
+    void _update_response(RctNode*, RctNode*, GradientContext* context = nullptr);
     void _scale_capacitance(float);
     void _scale_resistance(float);
 
     RctNode* _node(const std::string&);
+    void _build_derivative_cache();
+
+    std::optional<RcDerivativeCache> _derivative_cache;
 };
 
 // Function: num_nodes
@@ -177,10 +182,11 @@ class Net {
 
     float _load(Split, Tran) const;
 
-    std::optional<float> _slew(Split, Tran, float, Pin&) const;
+    std::optional<float> _slew(Split, Tran, float, Pin&, GradientContext* context = nullptr) const;
     std::optional<float> _delay(Split, Tran, Pin&) const;
     
-    void _update_rc_timing();
+    void _update_rc_timing(GradientContext* context = nullptr);
+    void _invalidate_rc_timing();
     void _attach(spef::Net&&);
     void _make_rct();
     //void _make_rct(const spef::Net&);
@@ -208,7 +214,6 @@ inline const Rct* Net::rct() const {
 };  // end of namespace ot. -----------------------------------------------------------------------
 
 #endif
-
 
 
 

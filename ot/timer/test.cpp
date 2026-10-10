@@ -1,6 +1,7 @@
 #include <ot/timer/test.hpp>
 #include <ot/timer/arc.hpp>
 #include <ot/timer/pin.hpp>
+#include <ot/timer/gradient_context.hpp>
 
 namespace ot {
 
@@ -85,7 +86,7 @@ void Test::_reset() {
 }
 
 // Procedure: _fprop_rat
-void Test::_fprop_rat(float period) {
+void Test::_fprop_rat(float period, GradientContext* context) {
 
   auto tv = _arc.timing_view();
 
@@ -122,6 +123,16 @@ void Test::_fprop_rat(float period) {
       *_arc._from._slew[fel][frf],
       *_arc._to._slew[el][rf]
     );
+    if(context) {
+      auto related = context->smooth_slew(&_arc._from, fel, frf, true);
+      auto constrained = context->smooth_slew(&_arc._to, el, rf, true);
+      auto constraint = related && constrained
+        ? tv[el]->constraint(frf, rf, *related, *constrained, context) : std::nullopt;
+      std::scoped_lock lock(context->smooth_values_mutex);
+      auto& stored = context->smooth_constraints[this][el][rf];
+      stored.reset();
+      if(constraint) stored = *constraint;
+    }
     
     if(_constraint[el][rf] && _related_at[el][rf]) {
       if(el == MIN) {
@@ -135,7 +146,6 @@ void Test::_fprop_rat(float period) {
 }
 
 };  // end of namespace ot. -----------------------------------------------------------------------
-
 
 
 

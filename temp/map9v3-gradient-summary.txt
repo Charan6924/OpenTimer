@@ -1,0 +1,11 @@
+Circuit: example/map9v3, original netlist, same library for MIN/MAX
+Hard late TNS: -916.91204833984375
+Hard late WNS: -22.23919677734375
+tns objective: -916.91296385228634
+  split: MAX; transitions: RISE and FALL; temperatures: 0.001
+  arcs: 1575; pins: 700; RC resistances: 0; RC capacitances: 0; LUTs: 316
+  finite gradient values: 14310; nonzero: 691
+wns objective: -22.239212244319599
+  split: MAX; transitions: RISE and FALL; temperatures: 0.001
+  arcs: 1575; pins: 700; RC resistances: 0; RC capacitances: 0; LUTs: 316
+  finite gradient values: 14310; nonzero: 346

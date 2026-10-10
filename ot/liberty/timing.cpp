@@ -1,4 +1,5 @@
 #include <ot/liberty/timing.hpp>
+#include <ot/timer/gradient_context.hpp>
 
 namespace ot {
 
@@ -412,7 +413,7 @@ void Timing::scale_capacitance(float s) {
 // Query the delay which is referenced by the output transition status, input slew, and driving 
 // load. The output transition status indicates the type of lut that should be used during the
 // linear interpolation or linear extrapolation.
-std::optional<float> Timing::delay(Tran irf, Tran orf, float slew, float load) const {
+std::optional<float> Timing::delay(Tran irf, Tran orf, float slew, float load, GradientContext* context) const {
 
   if(!is_transition_defined(irf, orf)) {
     return std::nullopt;
@@ -437,10 +438,28 @@ std::optional<float> Timing::delay(Tran irf, Tran orf, float slew, float load) c
   if(lut == nullptr) {
     return std::nullopt;
   }
+
+  // Map lut derivatives to the inputs used
+  const auto evaluate = [&](float val1, float val2, bool slew_first) {
+    const float value = (*lut)(val1, val2, context);
+    if(context) {
+      std::scoped_lock lock(context->lut_derivatives_mutex);
+      const auto& local = context->lut_derivatives.at(lut).at({val1, val2});
+      CellDelayDerivatives derivatives;
+      derivatives.lut = lut;
+      derivatives.dinput_slew = slew_first ? local.dval1 : local.dval2;
+      derivatives.dload = slew_first ? local.dval2 : local.dval1;
+      derivatives.interpolation = local;
+      // Store derivative
+      context->cell_delay_derivatives[this][{irf, orf, slew, load}] = derivatives;
+    }
+    return value;
+  };
   
   // Case 1: scalar.
   if(lut->lut_template == nullptr) {     
     if(lut->is_scalar()) {
+      if(context) return evaluate(slew, load, true);
       return lut->table[0];
     }
     else {
@@ -478,14 +497,14 @@ std::optional<float> Timing::delay(Tran irf, Tran orf, float slew, float load) c
   };
   
   // - perform the linear inter/extro-polation on indices1 and indices2
-  return (*lut)(val1, val2); 
+  return evaluate(val1, val2, *(lut->lut_template->variable1) == LutVar::INPUT_NET_TRANSITION);
 }
 
 // Function: slew
 // Query the slew which is referenced by the output transition status, input slew, and driving 
 // load. The output transition status indicates the type of lut that should be used during the
 // linear interpolation or linear extrapolation.
-std::optional<float> Timing::slew(Tran irf, Tran orf, float slew, float load) const {
+std::optional<float> Timing::slew(Tran irf, Tran orf, float slew, float load, GradientContext* context) const {
   
   if(!is_transition_defined(irf, orf)) {
     return std::nullopt;
@@ -512,10 +531,27 @@ std::optional<float> Timing::slew(Tran irf, Tran orf, float slew, float load) co
   if(lut == nullptr) {
     return std::nullopt;
   }
+
+  // Lambda to calculate derivative
+  const auto evaluate = [&](float val1, float val2, bool slew_first) {
+    const float value = (*lut)(val1, val2, context);
+    if(context) {
+      std::scoped_lock lock(context->lut_derivatives_mutex);
+      const auto& local = context->lut_derivatives.at(lut).at({val1, val2});
+      CellSlewDerivatives derivatives;
+      derivatives.lut = lut;
+      derivatives.dinput_slew = slew_first ? local.dval1 : local.dval2;
+      derivatives.dload = slew_first ? local.dval2 : local.dval1;
+      derivatives.interpolation = local;
+      context->cell_slew_derivatives[this][{irf, orf, slew, load}] = derivatives;
+    }
+    return value;
+  };
   
   // Case 1: scalar.
   if(lut->lut_template == nullptr) {     
     if(lut->is_scalar()) {
+      if(context) return evaluate(slew, load, true);
       return lut->table[0];
     }
     else {
@@ -553,7 +589,7 @@ std::optional<float> Timing::slew(Tran irf, Tran orf, float slew, float load) co
   }
   
   // - perform the linear inter/extro-polation on indices1 and indices2
-  return (*lut)(val1, val2); 
+  return evaluate(val1, val2, *(lut->lut_template->variable1) == LutVar::INPUT_NET_TRANSITION);
 }
 
 // Function: constraint
@@ -564,7 +600,8 @@ std::optional<float> Timing::constraint(
   Tran irf, 
   Tran orf, 
   float related_slew, 
-  float constrained_slew
+  float constrained_slew,
+  GradientContext* context
 ) const {
   
   if(!is_transition_defined(irf, orf)) {
@@ -591,20 +628,36 @@ std::optional<float> Timing::constraint(
   if(lut == nullptr) {
     return std::nullopt;
   }
-  
+  // Local derivative
+  const auto evaluate = [&](float val1, float val2, bool related_first) {
+    const float value = (*lut)(val1, val2, context);
+    if(context) {
+      std::scoped_lock lock(context->lut_derivatives_mutex);
+      const auto& local = context->lut_derivatives.at(lut).at({val1, val2});
+      ConstraintDerivatives derivatives;
+      derivatives.lut = lut;
+      derivatives.drelated_slew = related_first ? local.dval1 : local.dval2;
+      derivatives.dconstrained_slew = related_first ? local.dval2 : local.dval1;
+      derivatives.interpolation = local;
+      context->constraint_derivatives[this][{irf, orf, related_slew, constrained_slew}] = derivatives;
+    }
+    return value;
+  };
+
   // Case 1: scalar.
-  if(lut->lut_template == nullptr) {     
+  if(lut->lut_template == nullptr) {
     if(lut->is_scalar()) {
+      if(context) return evaluate(related_slew, constrained_slew, true);
       return lut->table[0];
     }
     else {
       OT_LOGF("lut without template must contain a single scalar");
     }
   }
-  
+
   // Case 2: non-scalar table.
   float val1 {0.0f}, val2 {0.0f};
-  
+
   // - obtain the input numerics
   assert(lut->lut_template->variable1);
 
@@ -632,7 +685,7 @@ std::optional<float> Timing::constraint(
   };
   
   // - perform the linear inter/extro-polation on indices1 and indices2
-  return (*lut)(val1, val2); 
+  return evaluate(val1, val2, *(lut->lut_template->variable1) == LutVar::RELATED_PIN_TRANSITION);
 }
 
 // operator

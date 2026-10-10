@@ -8,6 +8,8 @@
 
 namespace ot {
 
+struct GradientContext;
+
 // Enum: LutVar
 enum class LutVar {
   TOTAL_OUTPUT_NET_CAPACITANCE = 0,
@@ -61,7 +63,7 @@ struct Lut {
 
   const LutTemplate* lut_template {nullptr};
   
-  float operator() (float, float) const;
+  float operator() (float, float, GradientContext* = nullptr) const;
 
   bool is_scalar() const;
   bool empty() const;

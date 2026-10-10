@@ -1,6 +1,7 @@
 #include <ot/timer/arc.hpp>
 #include <ot/timer/pin.hpp>
 #include <ot/timer/net.hpp>
+#include <ot/timer/gradient_context.hpp>
 
 namespace ot {
 
@@ -81,7 +82,7 @@ void Arc::_reset_delay() {
 }
 
 // Procedure: _fprop_slew
-void Arc::_fprop_slew() {
+void Arc::_fprop_slew(GradientContext* context) {
 
   if(_has_state(LOOP_BREAKER)) {
     return;
@@ -89,21 +90,35 @@ void Arc::_fprop_slew() {
 
   std::visit(Functors{
     // Case 1: Net arc
-    [this] (Net* net) {
+    [this, context] (Net* net) {
       FOR_EACH_EL_RF(el, rf) {
         if(_from._slew[el][rf]) {
           if(auto so = net->_slew(el, rf, *(_from._slew[el][rf]), _to); so) {
             _to._relax_slew(this, el, rf, el, rf, *so);
           }
         }
+        if(context) {
+          if(auto si = context->smooth_slew(&_from, el, rf, bool(_from._slew[el][rf])); si) {
+            if(auto so = net->_slew(el, rf, *si, _to, context); so) {
+              _to._relax_slew(this, el, rf, el, rf, *so, context);
+            }
+          }
+        }
       }
     },
     // Case 2: Cell arc
-    [this] (TimingView tv) {
+    [this, context] (TimingView tv) {
       FOR_EACH_EL_RF_RF_IF(el, frf, trf, (tv[el] && _from._slew[el][frf])) {
         auto lc = (_to._net) ? _to._net->_load(el, trf) : 0.0f;
         if(auto so = tv[el]->slew(frf, trf, *_from._slew[el][frf], lc); so) {
           _to._relax_slew(this, el, frf, el, trf, *so);
+        }
+        if(context) {
+          if(auto si = context->smooth_slew(&_from, el, frf, true); si) {
+            if(auto so = tv[el]->slew(frf, trf, *si, lc, context); so) {
+              _to._relax_slew(this, el, frf, el, trf, *so, context);
+            }
+          }
         }
       }
     }
@@ -111,26 +126,44 @@ void Arc::_fprop_slew() {
 }
 
 // Procedure: _fprop_delay
-void Arc::_fprop_delay() {
+void Arc::_fprop_delay(GradientContext* context) {
   
   if(_has_state(LOOP_BREAKER)) {
     return;
   }
 
+  if(context) {
+    std::scoped_lock lock(context->smooth_values_mutex);
+    context->smooth_delays[this] = {};
+  }
+
   std::visit(Functors{
     // Case 1: Net arc
-    [this] (Net* net) {
+    [this, context] (Net* net) {
       FOR_EACH_EL_RF(el, rf) {
         _delay[el][rf][rf] = net->_delay(el, rf, _to);
+        if(context && _delay[el][rf][rf]) {
+          std::scoped_lock lock(context->smooth_values_mutex);
+          context->smooth_delays[this][el][rf][rf] = *_delay[el][rf][rf];
+        }
       }
     },
     // Case 2: Cell arc
-    [this] (TimingView tv) {
+    [this, context] (TimingView tv) {
       FOR_EACH_EL_RF_RF_IF(el, frf, trf, (tv[el] && _from._slew[el][frf])) {
         auto lc = (_to._net) ? _to._net->_load(el, trf) : 0.0f;
         auto si = *_from._slew[el][frf];
         auto delay = tv[el]->delay(frf, trf, si, lc);
         _delay[el][frf][trf] = delay;
+        if(context) {
+          auto smooth_si = context->smooth_slew(&_from, el, frf, true);
+          auto smooth_delay = smooth_si
+            ? tv[el]->delay(frf, trf, *smooth_si, lc, context) : std::nullopt;
+          std::scoped_lock lock(context->smooth_values_mutex);
+          auto& stored = context->smooth_delays[this][el][frf][trf];
+          stored.reset();
+          if(smooth_delay) stored = *smooth_delay;
+        }
         auto ipower = tv[el]->internal_power.power(frf, trf, si, lc);
         _ipower[el][frf][trf] = ipower;
 
@@ -225,8 +258,3 @@ bool Arc::_has_state(int s) const {
 
 
 };  // end of namespace ot. -----------------------------------------------------------------------
-
-
-
-
-

@@ -19,6 +19,7 @@
 #include <ot/sdc/sdc.hpp>
 #include <ot/tau/tau15.hpp>
 #include <ot/timer/gradient.hpp>
+#include <ot/timer/gradient_context.hpp>
 
 namespace ot {
 
@@ -131,25 +132,9 @@ class Timer {
 
   private:
 
-    using GradientPinData = TimingData<
-      std::optional<double>, MAX_SPLIT, MAX_TRAN
-    >;
-
-    using GradientArcData = TimingData<
-      std::optional<double>, MAX_SPLIT, MAX_TRAN, MAX_TRAN
-    >;
-
-    struct GradientContext {
-      explicit GradientContext(const GradientOptions& o) : options {o} {}
-
-      const GradientOptions& options;
-      std::vector<GradientPinData> smooth_arrivals;
-      std::vector<GradientPinData> pin_adjoints;
-      std::vector<GradientArcData> reduction_weights;
-      std::vector<GradientArcData> arc_gradients;
-      std::optional<double> objective_value;
-      GradientReport report;
-    };
+    using GradientPinData = ot::GradientPinData;
+    using GradientArcData = ot::GradientArcData;
+    using GradientContext = ot::GradientContext;
 
     mutable std::shared_mutex _mutex;
 
@@ -224,15 +209,18 @@ class Timer {
     void _update_endpoints();
     void _update_area();
     void _update_power();
-    void _fprop_rc_timing(Pin&);
-    void _fprop_slew(Pin&);
-    void _fprop_delay(Pin&);
+    void _fprop_rc_timing(Pin&, GradientContext* = nullptr);
+    void _fprop_slew(Pin&, GradientContext* = nullptr);
+    void _fprop_delay(Pin&, GradientContext* = nullptr);
     void _fprop_at(Pin&);
     void _smooth_fprop_at(Pin&, GradientContext&);
     void _seed_gradient_objective(GradientContext&);
-    void _fprop_test(Pin&);
+    void _fprop_test(Pin&, GradientContext* = nullptr);
     void _bprop_rat(Pin&);
     void _gradient_bprop_rat(Pin&, GradientContext&);
+    void _gradient_bprop_models(Pin&, GradientContext&);
+    void _gradient_seed_constraints(GradientContext&);
+    void _gradient_finalize_models(GradientContext&);
     void _build_prop_cands();
     void _build_fprop_cands(Pin&);
     void _build_bprop_cands(Pin&);

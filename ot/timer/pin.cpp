@@ -2,6 +2,7 @@
 #include <ot/timer/arc.hpp>
 #include <ot/timer/net.hpp>
 #include <ot/timer/test.hpp>
+#include <ot/timer/gradient_context.hpp>
 
 namespace ot {
 
@@ -350,22 +351,51 @@ float Pin::cap(Split el, Tran rf) const {
 
 // Procedure: _relax_slew
 // Update the slew of the node
-void Pin::_relax_slew(Arc* arc, Split fel, Tran frf, Split tel, Tran trf, float val) {
+void Pin::_relax_slew(Arc* arc, Split fel, Tran frf, Split tel, Tran trf, float val, GradientContext* context) {
+  if(context) {
+    GradientContext::require_finite(val, "smooth slew candidate must be finite");
+    const double tau = context->options.arrival_temperature;
+    if(!std::isfinite(tau) || tau <= 0.0) {
+      throw std::invalid_argument("slew temperature must be finite and greater than zero");
+    }
+    std::scoped_lock lock(context->slew_derivatives_mutex);
+    auto& state = context->smooth_slews[this][tel][trf];
+    const double sign = tel == MIN ? -1.0 : 1.0;
+    double weight = 1.0;
+    if(state.value) {
+      const double old = sign * *state.value;
+      const double candidate = sign * static_cast<double>(val);
+      const double peak = std::max(old, candidate);
+      const double old_exp = std::exp((old - peak) / tau);
+      const double new_exp = std::exp((candidate - peak) / tau);
+      const double sum = old_exp + new_exp;
+      const double old_weight = old_exp / sum;
+      weight = new_exp / sum;
+      for(auto& previous : state.candidates) {
+        previous.weight *= old_weight;
+      }
+      state.value = sign * (peak + tau * std::log(sum));
+    }
+    else {
+      state.value = val;
+    }
+    state.candidates.push_back({arc, fel, frf, weight});
+    GradientContext::require_finite(*state.value, "smooth slew reduction must be finite");
+    return;
+  }
 
   switch(tel) {
-
     case MIN:
       if(!_slew[tel][trf] || val < *_slew[tel][trf]) {
         _slew[tel][trf].emplace(arc, fel, frf, val);
       }
     break;
-
     case MAX:
       if(!_slew[tel][trf] || val > *_slew[tel][trf]) {
         _slew[tel][trf].emplace(arc, fel, frf, val);
       }
     break;
-  };
+  }
 }
 
 // Procedure: _relax_at
@@ -412,7 +442,7 @@ void Pin::_remap_cellpin(Split el, const Cellpin* cpin) {
   (std::get<CellpinView>(_handle))[el] = cpin;
 
   if(_net) {
-    _net->_rc_timing_updated = false;
+    _net->_invalidate_rc_timing();
   }
 }
 
@@ -422,7 +452,7 @@ void Pin::_remap_cellpin(Split el, const Cellpin& cpin) {
   (std::get<CellpinView>(_handle))[el] = &cpin;
 
   if(_net) {
-    _net->_rc_timing_updated = false;
+    _net->_invalidate_rc_timing();
   }
 }
 
@@ -450,7 +480,6 @@ bool Pin::_has_no_state(int s) const {
 }
 
 };  // end of namespace ot. -----------------------------------------------------------------------
-
 
 
 

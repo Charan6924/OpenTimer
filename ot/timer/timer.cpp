@@ -1,4 +1,5 @@
 #include <ot/timer/timer.hpp>
+#include <ot/timer/gradient.hpp>
 
 namespace ot {
 
@@ -730,33 +731,40 @@ Arc& Timer::_insert_arc(Pin& from, Pin& to, TimingView tv) {
 }
 
 // Procedure: _fprop_rc_timing
-void Timer::_fprop_rc_timing(Pin& pin) {
+void Timer::_fprop_rc_timing(Pin& pin, GradientContext* context) {
   if(auto net = pin._net; net) {
-    net->_update_rc_timing();
+    net->_update_rc_timing(context);
   }
 }
 
 // Procedure: _fprop_slew
-void Timer::_fprop_slew(Pin& pin) {
+void Timer::_fprop_slew(Pin& pin, GradientContext* context) {
   
   // clear slew  
   pin._reset_slew();
+  if(context) {
+    std::scoped_lock lock(context->slew_derivatives_mutex);
+    context->smooth_slews.erase(&pin);
+  }
 
   // PI
   if(auto pi = pin.primary_input(); pi) {
     FOR_EACH_EL_RF_IF(el, rf, pi->_slew[el][rf]) {
       pin._relax_slew(nullptr, el, rf, el, rf, *(pi->_slew[el][rf]));
+      if(context) {
+        pin._relax_slew(nullptr, el, rf, el, rf, *(pi->_slew[el][rf]), context);
+      }
     }
   }
   
   // Relax the slew from its fanin.
   for(auto arc : pin._fanin) {
-    arc->_fprop_slew();
+    arc->_fprop_slew(context);
   }
 }
 
 // Procedure: _fprop_delay
-void Timer::_fprop_delay(Pin& pin) {
+void Timer::_fprop_delay(Pin& pin, GradientContext* context) {
 
   // clear delay
   for(auto arc : pin._fanin) {
@@ -765,7 +773,7 @@ void Timer::_fprop_delay(Pin& pin) {
 
   // Compute the delay from its fanin.
   for(auto arc : pin._fanin) {
-    arc->_fprop_delay();
+    arc->_fprop_delay(context);
   }
 }
 
@@ -795,15 +803,26 @@ void Timer::_smooth_fprop_at(Pin& pin, GradientContext& context){
     // Clear old weights and exclude arcs removed from propagation by loop breaking.
     for(auto arc : pin._fanin) {
       auto& weights = context.reduction_weights[arc->idx()];
+      GradientArcData delays {};
+      {
+        std::scoped_lock lock(context.smooth_values_mutex);
+        if(auto found = context.smooth_delays.find(arc); found != context.smooth_delays.end()) {
+          delays = found->second;
+        }
+      }
       FOR_EACH_RF(frf) {
         weights[el][frf][trf].reset();
         if(arc->is_loop_breaker()) {
           continue;
         }
         const auto& source = context.smooth_arrivals[arc->_from.idx()][el][frf];
-        const auto& delay = arc->_delay[el][frf][trf];
+        const auto& delay = delays[el][frf][trf];
+        if(source && arc->_delay[el][frf][trf] && !delay) {
+          throw std::runtime_error("missing smooth arc delay for a timed arrival candidate");
+        }
         if(source && delay) {
-          candidates.push_back({*source + *delay, arc, frf});
+          candidates.push_back({GradientContext::require_finite(*source + *delay,
+            "smooth arrival candidate must be finite"), arc, frf});
         }
       }
     }
@@ -825,7 +844,8 @@ void Timer::_smooth_fprop_at(Pin& pin, GradientContext& context){
       sum += std::exp((sign * candidate.value - largest) / tau);
     }
     // Store max/min value
-    arrivals[el][trf] = sign * (largest + tau * std::log(sum));
+    arrivals[el][trf] = GradientContext::require_finite(
+      sign * (largest + tau * std::log(sum)), "smooth arrival reduction must be finite");
 
     // Store local derivative for later use
     for(const auto& candidate : candidates) {
@@ -846,6 +866,7 @@ void Timer::_seed_gradient_objective(GradientContext& context) {
     Tran transition;
     Pin* clock_pin;
     Tran clock_transition;
+    const Test* test {nullptr};
   };
 
   // vector of endpoint pins
@@ -875,7 +896,17 @@ void Timer::_seed_gradient_objective(GradientContext& context) {
 
     for(const auto& test : _tests) {
       const auto tv = test._arc.timing_view();
-      if(_clocks.empty() || !tv[el] || !test._constraint[el][rf]) continue;
+      std::optional<double> constraint;
+      {
+        std::scoped_lock lock(context.smooth_values_mutex);
+        if(auto found = context.smooth_constraints.find(&test); found != context.smooth_constraints.end()) {
+          constraint = found->second[el][rf];
+        }
+      }
+      if(test._constraint[el][rf] && !constraint) {
+        throw std::runtime_error("missing smooth constraint for a timed endpoint");
+      }
+      if(_clocks.empty() || !tv[el] || !constraint) continue;
 
       const Tran crf = tv[el]->is_rising_edge_triggered() ? RISE : FALL;
       if(crf == FALL && !tv[el]->is_falling_edge_triggered()) continue;
@@ -889,10 +920,10 @@ void Timer::_seed_gradient_objective(GradientContext& context) {
       if(!clock || !data) continue;
       // Match the existing test calculation's single-clock assumption.
       const double required = el == MIN
-        ? *clock + *test._constraint[el][rf]
-        : *clock + _clocks.begin()->second.period() - *test._constraint[el][rf];
+        ? *clock + *constraint
+        : *clock + _clocks.begin()->second.period() - *constraint;
       endpoints.push_back({el == MIN ? *data - required : required - *data,
-                           data_pin.idx(), el, rf, &clock_pin, crf});
+                           data_pin.idx(), el, rf, &clock_pin, crf, &test});
     }
   }
   if(endpoints.empty()) {
@@ -901,7 +932,10 @@ void Timer::_seed_gradient_objective(GradientContext& context) {
   }
 
   double worst = std::numeric_limits<double>::infinity();
-  for(const auto& endpoint : endpoints) worst = std::min(worst, endpoint.slack);
+  for(const auto& endpoint : endpoints) {
+    GradientContext::require_finite(endpoint.slack, "endpoint slack must be finite");
+    worst = std::min(worst, endpoint.slack);
+  }
   const double tau = context.options.objective_temperature;
   double sum = 0.0;
 
@@ -917,9 +951,11 @@ void Timer::_seed_gradient_objective(GradientContext& context) {
   }
 
   // store local derivative for later use
+  GradientContext::require_finite(*context.objective_value, "timing objective must be finite");
   auto seed = [&context](size_t pin, Split el, Tran rf, double value) {
     auto& adjoint = context.pin_adjoints[pin][el][rf];
-    adjoint = adjoint.value_or(0.0) + value;
+    adjoint = GradientContext::require_finite(adjoint.value_or(0.0) + value,
+      "objective arrival adjoint must be finite");
   };
 
   for(const auto& endpoint : endpoints) {
@@ -933,7 +969,12 @@ void Timer::_seed_gradient_objective(GradientContext& context) {
       seed(endpoint.clock_pin->idx(), endpoint.split == MIN ? MAX : MIN,
            endpoint.clock_transition, -data_seed);
     }
+    if(endpoint.test) {
+      auto& adjoint = context.constraint_adjoints[endpoint.test][endpoint.split][endpoint.transition];
+      adjoint = adjoint.value_or(0.0) - q;
+    }
   }
+  _gradient_seed_constraints(context);
   context.report.objective_value = context.objective_value;
 }
 
@@ -957,7 +998,7 @@ void Timer::_fprop_at(Pin& pin) {
 }
 
 // Procedure: _fprop_test
-void Timer::_fprop_test(Pin& pin) {
+void Timer::_fprop_test(Pin& pin, GradientContext* context) {
   
   // reset tests
   for(auto test : pin._tests) {
@@ -970,7 +1011,7 @@ void Timer::_fprop_test(Pin& pin) {
     // Update the rat
     for(auto test : pin._tests) {
       // TODO: currently we assume a single clock...
-      test->_fprop_rat(_clocks.begin()->second._period);
+      test->_fprop_rat(_clocks.begin()->second._period, context);
       
       // compute the cppr credit if any
       if(_cppr_analysis) {
@@ -1031,7 +1072,7 @@ void Timer::_gradient_bprop_rat(Pin& pin, GradientContext& context){
         value += context.arc_gradients[arc->idx()][el][frf][trf].value_or(0.0);
       }
     }
-    adjoints[el][frf] = value;
+    adjoints[el][frf] = GradientContext::require_finite(value, "arrival adjoint must be finite");
   }
 
   // Each destination owns its incoming arc gradients. Upstream pin tasks
@@ -1044,8 +1085,13 @@ void Timer::_gradient_bprop_rat(Pin& pin, GradientContext& context){
         continue;
       }
       const auto& weight = context.reduction_weights[arc->idx()][el][frf][trf];
+      if(!arc->is_loop_breaker() && context.smooth_arrivals[arc->_from.idx()][el][frf] &&
+         context.smooth_arrivals[pin.idx()][el][trf] && (!weight || !adjoints[el][trf])) {
+        throw std::runtime_error("missing reduction weight or adjoint for a timed arc");
+      }
       gradients[el][frf][trf] = !arc->is_loop_breaker() && weight && adjoints[el][trf]
         ? *weight * *adjoints[el][trf] : 0.0;
+      GradientContext::require_finite(*gradients[el][frf][trf], "arc delay gradient must be finite");
     }
   }
 }
@@ -1143,12 +1189,12 @@ void Timer::_build_prop_tasks(GradientContext* gradient_context) {
   for(auto pin : _fprop_cands) {
     assert(!pin->_ftask);
     pin->_ftask = _taskflow.emplace([this, pin, gradient_context] () {
-      _fprop_rc_timing(*pin);
-      _fprop_slew(*pin);
-      _fprop_delay(*pin);
+      _fprop_rc_timing(*pin, gradient_context);
+      _fprop_slew(*pin, gradient_context);
+      _fprop_delay(*pin, gradient_context);
       // Refresh exact state so subsequent ordinary reports remain valid.
       _fprop_at(*pin);
-      _fprop_test(*pin);
+      _fprop_test(*pin, gradient_context);
       if(gradient_context) {
         _smooth_fprop_at(*pin, *gradient_context);
       }
@@ -1191,6 +1237,7 @@ void Timer::_build_prop_tasks(GradientContext* gradient_context) {
         // Keep exact required times current alongside the gradient state.
         _bprop_rat(*pin);
         _gradient_bprop_rat(*pin, *gradient_context);
+        _gradient_bprop_models(*pin, *gradient_context);
       });
 
       objective_task->precede(*pin->_btask);
@@ -1214,6 +1261,14 @@ void Timer::_build_prop_tasks(GradientContext* gradient_context) {
     if(pin->_btask->num_predecessors() == 0 && pin->_ftask) {
       pin->_ftask->precede(pin->_btask.value()); 
     }
+  }
+
+  if(gradient_context) {
+    auto finalize = _taskflow.emplace([this, gradient_context]() {
+      _gradient_finalize_models(*gradient_context);
+    });
+    objective_task->precede(finalize);
+    for(auto pin : _bprop_cands) pin->_btask->precede(finalize);
   }
 
 }
@@ -1246,7 +1301,7 @@ void Timer::_update_timing(GradientContext* gradient_context) {
 
   
   // Timing is update-to-date
-  if(!_lineage && !gradient_context){
+  if(!_lineage && !gradient_context && !_has_state(FULL_TIMING)){
     assert(_frontiers.size() == 0);
     return;
   }
@@ -1262,10 +1317,18 @@ void Timer::_update_timing(GradientContext* gradient_context) {
     gradient_context->pin_adjoints.resize(_idx2pin.size());
     gradient_context->reduction_weights.resize(_idx2arc.size());
     gradient_context->arc_gradients.resize(_idx2arc.size());
+    gradient_context->slew_adjoints.resize(_idx2pin.size());
+    gradient_context->arc_slew_contributions.resize(_idx2arc.size());
+    gradient_context->arc_load_contributions.resize(_idx2arc.size());
+    gradient_context->arc_impulse_contributions.resize(_idx2arc.size());
   }
 
-  if(_has_state(FULL_TIMING) || gradient_context) {
+  if(_has_state(FULL_TIMING)) {
     _insert_full_timing_frontiers();
+  }
+  else if(gradient_context) {
+    // Recompute smooth pin values while using RC cache
+    for(auto& entry : _pins) _insert_frontier(entry.second);
   }
 
   // build propagation tasks
@@ -1275,9 +1338,21 @@ void Timer::_update_timing(GradientContext* gradient_context) {
   //_taskflow.dump(std::cout);
 
   // Execute the task
-  _executor.run(_taskflow).wait();
+  try {
+    auto execution = _executor.run(_taskflow);
+    if(gradient_context) execution.get();
+    else execution.wait();
+  }
+  catch(...) {
+    _taskflow.clear();
+    _clear_prop_tasks();
+    _clear_frontiers();
+    _remove_state();
+    _insert_state(FULL_TIMING);
+    throw;
+  }
   _taskflow.clear();
-  
+
   // Clear the propagation tasks.
   _clear_prop_tasks();
 
@@ -1533,7 +1608,7 @@ void Timer::_insert_full_timing_frontiers() {
 
   // clear the rc-net update flag
   for(auto& kvp : _nets) {
-    kvp.second._rc_timing_updated = false;
+    kvp.second._invalidate_rc_timing();
   }
 }
 
@@ -1765,7 +1840,7 @@ void Timer::_set_load(PrimaryOutput& po, Split m, Tran t, std::optional<float> v
 
   // Update the net load
   if(auto net = po._pin._net) {
-    net->_rc_timing_updated = false;
+    net->_invalidate_rc_timing();
   }
   
   // Enable the timing propagation.

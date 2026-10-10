@@ -5,6 +5,8 @@
 
 namespace ot {
 
+struct GradientContext;
+
 // Forward declaration
 class Timer;
 class Net;
@@ -190,7 +192,7 @@ class Pin {
     void _reset_slew();
     void _reset_at();
     void _reset_rat();
-    void _relax_slew(Arc*, Split, Tran, Split, Tran, float);
+    void _relax_slew(Arc*, Split, Tran, Split, Tran, float, GradientContext* context = nullptr);
     void _relax_at(Arc*, Split, Tran, Split, Tran, float);
     void _relax_rat(Arc*, Split, Tran, Split, Tran, float);
     void _insert_state(int);
@@ -316,8 +318,6 @@ inline size_t Pin::num_fanouts() const {
 };  // end of namespace ot. -----------------------------------------------------------------------
 
 #endif
-
-
 
 
 

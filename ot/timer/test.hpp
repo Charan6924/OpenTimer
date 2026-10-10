@@ -46,7 +46,7 @@ class Test {
     TimingData<std::optional<float>, MAX_SPLIT, MAX_TRAN> _related_at;
 
     void _reset();
-    void _fprop_rat(float);
+    void _fprop_rat(float, GradientContext* = nullptr);
     
     Pin& _constrained_pin();
     Pin& _related_pin();
@@ -58,5 +58,4 @@ class Test {
 
 
 #endif
-
 

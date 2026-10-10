@@ -9,6 +9,7 @@ namespace ot {
 class Pin;
 class Net;
 class Test;
+struct GradientContext;
 
 // ------------------------------------------------------------------------------------------------
 
@@ -63,10 +64,10 @@ class Arc {
     TimingData<std::optional<float>, MAX_SPLIT, MAX_TRAN, MAX_TRAN> _ipower;
 
     void _remap_timing(Split, const Timing&);
-    void _fprop_slew();
+    void _fprop_slew(GradientContext* = nullptr);
     void _fprop_at();
     void _reset_delay();
-    void _fprop_delay();
+    void _fprop_delay(GradientContext* = nullptr);
     void _bprop_rat();
     void _insert_state(int);
     void _remove_state(int = 0);
@@ -92,7 +93,6 @@ inline const Pin& Arc::to() const {
 };  // end of namespace ot. -----------------------------------------------------------------------
 
 #endif
-
 
 
 
