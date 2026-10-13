@@ -1,6 +1,17 @@
 #include <ot/timer/timer.hpp>
 
 namespace ot {
+
+std::optional<float> GradientContext::smooth_slew(const Pin* pin, Split el, Tran rf, bool required) const {
+  if(!pin || pin->idx() >= smooth_slews.size() || !smooth_slews[pin->idx()][el][rf].value) {
+    if(required) throw std::runtime_error("missing smooth slew for a timed pin state");
+    return std::nullopt;
+  }
+  const float value = static_cast<float>(*smooth_slews[pin->idx()][el][rf].value);
+  require_finite(value, "smooth slew is nonfinite or outside float range");
+  return value;
+}
+
 namespace {
 
 void add(double& target, double value) {
@@ -13,10 +24,9 @@ void add(std::optional<double>& target, double value) {
 
 void accumulate_lut(GradientContext& context, const Lut* lut,
                     const LutDerivatives& local, double seed) {
-  if(!context.options.collect_lut_gradients) return;
+  if(seed == 0.0 || !context.options.collect_lut_gradients) return;
   if(!lut) throw std::runtime_error("missing LUT for a model derivative");
-  std::scoped_lock lock(context.model_adjoints_mutex);
-  auto& values = context.lut_adjoints[lut];
+  auto& values = context.worker_data().lut_adjoints[lut];
   if(values.empty()) values.resize(lut->table.size(), 0.0);
   for(size_t i = 0; i < local.count; ++i) {
     add(values.at(local.table_indices[i]), seed * local.table_weights[i]);
@@ -33,12 +43,14 @@ void Timer::_gradient_seed_constraints(GradientContext& context) {
     const auto tv = test._arc.timing_view();
     FOR_EACH_EL_RF(el, rf) {
       const auto seed = seeds->second[el][rf];
-      if(!seed) continue;
+      if(!seed || *seed == 0.0) continue;
       const Split cel = el == MIN ? MAX : MIN;
       const Tran crf = tv[el]->is_rising_edge_triggered() ? RISE : FALL;
       const float related = *context.smooth_slew(&test._arc._from, cel, crf, true);
       const float constrained = *context.smooth_slew(&test._arc._to, el, rf, true);
-      const auto& local = context.constraint_derivatives.at(tv[el]).at({crf, rf, related, constrained});
+      ConstraintDerivatives local;
+      if(!tv[el]->constraint(crf, rf, related, constrained, nullptr, &local))
+        throw std::runtime_error("missing constraint derivative");
       add(context.slew_adjoints[test._arc._from.idx()][cel][crf], *seed * local.drelated_slew);
       add(context.slew_adjoints[test._arc._to.idx()][el][rf], *seed * local.dconstrained_slew);
       accumulate_lut(context, local.lut, local.interpolation, *seed);
@@ -56,7 +68,7 @@ void Timer::_gradient_bprop_models(Pin& pin, GradientContext& context) {
     for(auto arc : pin._fanout) {
       if(arc->is_loop_breaker()) continue;
       FOR_EACH_RF(trf) {
-        add(value, context.arc_slew_contributions[arc->idx()][el][rf][trf].value_or(0.0));
+        add(value, context.arc_slew_contributions[arc->idx()][el][rf][trf]);
       }
     }
     slew_adjoints[el][rf] = value;
@@ -65,21 +77,21 @@ void Timer::_gradient_bprop_models(Pin& pin, GradientContext& context) {
   for(auto arc : pin._fanin) {
     if(arc->is_loop_breaker()) continue;
     const auto tv = arc->is_cell_arc() ? arc->timing_view() : TimingView {};
-    const auto delays = context.smooth_delays.find(arc);
+    const auto& delays = context.smooth_delays[arc->idx()];
     FOR_EACH_EL_RF_RF(el, frf, trf) {
-      const double delay_seed = context.arc_gradients[arc->idx()][el][frf][trf].value_or(0.0);
+      const double delay_seed = context.arc_gradients[arc->idx()].get(el, frf, trf).value_or(0.0);
       double slew_seed = 0.0;
       bool has_slew_candidate = false;
-      auto states = context.smooth_slews.find(&pin);
-      if(states != context.smooth_slews.end()) {
-        for(const auto& candidate : states->second[el][trf].candidates) {
+      {
+        for(const auto& candidate : context.smooth_slews[pin.idx()][el][trf].candidates) {
           if(candidate.arc == arc && candidate.source_split == el && candidate.source_transition == frf) {
             has_slew_candidate = true;
             add(slew_seed, slew_adjoints[el][trf].value_or(0.0) * candidate.weight);
           }
         }
       }
-      const bool has_delay = delays != context.smooth_delays.end() && delays->second[el][frf][trf];
+      if(delay_seed == 0.0 && slew_seed == 0.0) continue;
+      const bool has_delay = bool(delays.get(el, frf, trf));
       if(!has_delay && !has_slew_candidate) continue;
       // A net delay depends on RC values even when no input slew is supplied.
       const float si = arc->is_cell_arc() || has_slew_candidate
@@ -88,15 +100,18 @@ void Timer::_gradient_bprop_models(Pin& pin, GradientContext& context) {
       double load = 0.0;
       if(arc->is_cell_arc()) {
         const float capacitance = pin._net ? pin._net->_load(el, trf) : 0.0f;
-        const auto key = GradientContext::CellDelayKey {frf, trf, si, capacitance};
         if(has_delay) {
-          const auto& local = context.cell_delay_derivatives.at(tv[el]).at(key);
+          CellDelayDerivatives local;
+          if(!tv[el]->delay(frf, trf, si, capacitance, nullptr, &local))
+            throw std::runtime_error("missing cell delay derivative");
           add(source_slew, delay_seed * local.dinput_slew);
           add(load, delay_seed * local.dload);
           accumulate_lut(context, local.lut, local.interpolation, delay_seed);
         }
         if(has_slew_candidate) {
-          const auto& local = context.cell_slew_derivatives.at(tv[el]).at(key);
+          CellSlewDerivatives local;
+          if(!tv[el]->slew(frf, trf, si, capacitance, nullptr, &local))
+            throw std::runtime_error("missing cell slew derivative");
           add(source_slew, slew_seed * local.dinput_slew);
           add(load, slew_seed * local.dload);
           accumulate_lut(context, local.lut, local.interpolation, slew_seed);
@@ -109,9 +124,10 @@ void Timer::_gradient_bprop_models(Pin& pin, GradientContext& context) {
           auto* node = tree->_node(pin.name());
           if(!node) throw std::runtime_error("missing RC sink node in gradient pass");
           if(has_slew_candidate) {
-            const auto& local = context.rc_slew_derivatives.at(node).at({el, frf, si});
+            const float so = node->slew(el, frf, si);
+            const RcSlewDerivatives local {static_cast<double>(si) / so, 1.0 / (2.0 * so)};
             source_slew = slew_seed * local.dinput_slew;
-            context.arc_impulse_contributions[arc->idx()][el][frf][trf] =
+            context.arc_impulse_contributions.at(arc->idx())[el][frf][trf] =
               GradientContext::require_finite(slew_seed * local.dimpulse, "RC impulse adjoint must be finite");
           }
         }
@@ -132,13 +148,13 @@ void Timer::_gradient_finalize_models(GradientContext& context) {
   using StateValues = TimingData<double, MAX_SPLIT, MAX_TRAN>;
   std::unordered_map<const Net*, StateValues> net_loads;
   std::vector<StateValues> pin_caps(_idx2pin.size());
-  for(const auto& arc : _arcs) {
+  if(context.active_seeds) for(const auto& arc : _arcs) {
     if(arc.is_loop_breaker()) continue;
     FOR_EACH_EL_RF_RF(el, frf, trf) {
       if(arc.is_cell_arc()) {
         if(auto* net = arc._to._net) {
           add(net_loads[net][el][trf],
-            context.arc_load_contributions[arc.idx()][el][frf][trf].value_or(0.0));
+            context.arc_load_contributions[arc.idx()][el][frf][trf]);
         }
       }
       else if(frf == trf) {
@@ -147,8 +163,8 @@ void Timer::_gradient_finalize_models(GradientContext& context) {
           auto* node = tree->_node(arc._to.name());
           if(!node) throw std::runtime_error("missing RC node while reducing model adjoints");
           auto& adjoint = context.rc_trees[tree].adjoints[node][el][trf];
-          add(adjoint.delay, context.arc_gradients[arc.idx()][el][frf][trf].value_or(0.0));
-          add(adjoint.impulse, context.arc_impulse_contributions[arc.idx()][el][frf][trf].value_or(0.0));
+          add(adjoint.delay, context.arc_gradients[arc.idx()].get(el, frf, trf).value_or(0.0));
+          add(adjoint.impulse, context.arc_impulse_contributions.at(arc.idx())[el][frf][trf]);
         }
       }
     }
@@ -236,6 +252,7 @@ void Timer::_gradient_finalize_models(GradientContext& context) {
     }
   }
 
+  context.report.pins.reserve(_pins.size());
   for(const auto& entry : _pins) {
     const auto& pin = entry.second;
     PinParameterGradient result;
@@ -252,9 +269,8 @@ void Timer::_gradient_finalize_models(GradientContext& context) {
           result.arrival[el][rf] = GradientContext::require_finite(
             weight * context.pin_adjoints[pin.idx()][el][rf].value_or(0.0), "input arrival gradient must be finite");
         }
-        auto states = context.smooth_slews.find(&pin);
-        if(states != context.smooth_slews.end()) {
-          for(const auto& candidate : states->second[el][rf].candidates) {
+        {
+          for(const auto& candidate : context.smooth_slews[pin.idx()][el][rf].candidates) {
             if(!candidate.arc) add(result.slew[el][rf],
               candidate.weight * context.slew_adjoints[pin.idx()][el][rf].value_or(0.0));
           }
@@ -267,10 +283,18 @@ void Timer::_gradient_finalize_models(GradientContext& context) {
     [](const auto& a, const auto& b) {return a.pin < b.pin;});
 
   if(context.options.collect_lut_gradients) {
+    for(const auto& worker : context.workers) {
+      context.used_luts.insert(worker.used_luts.begin(), worker.used_luts.end());
+      for(const auto& entry : worker.lut_adjoints) {
+        auto& values = context.lut_adjoints[entry.first];
+        if(values.empty()) values.resize(entry.second.size(), 0.0);
+        for(size_t i=0; i<values.size(); ++i) add(values[i], entry.second[i]);
+      }
+    }
     std::unordered_map<const Lut*, size_t> indices;
     const auto register_table = [&](const std::optional<Lut>& table, const Arc& arc,
                                     Split el, LutTimingKind kind, Tran rf) {
-      if(!table || context.lut_derivatives.find(&*table) == context.lut_derivatives.end()) return;
+      if(!table || context.used_luts.find(&*table) == context.used_luts.end()) return;
       auto found = indices.find(&*table);
       if(found == indices.end()) {
         const size_t id = context.report.luts.size();

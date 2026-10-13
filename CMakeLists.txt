@@ -378,3 +378,23 @@ set_target_properties(ot-sizer PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOU
 message(STATUS "OpenTimer sizer: ${OT_SIZER}")
 
 
+
+
+# Physical gradient regression checks (run from the source tree for fixtures).
+if(BUILD_TESTING)
+  foreach(check lut-derivative timing-delay-derivative timing-slew-derivative timing-constraint-derivative gradient-validation physical-gradient physical-example gradient-performance)
+    add_executable(${check}-check temp/${check}-check.cpp)
+    target_link_libraries(${check}-check OpenTimer Threads::Threads)
+    if(NOT check STREQUAL "physical-example" AND NOT check STREQUAL "gradient-performance")
+      add_test(NAME gradient.${check} COMMAND ${check}-check)
+      set_tests_properties(gradient.${check} PROPERTIES WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    endif()
+  endforeach()
+  add_test(NAME gradient.worker-count COMMAND gradient-performance-check threads)
+  add_test(NAME gradient.inactive-and-active COMMAND gradient-performance-check)
+  set_tests_properties(gradient.worker-count gradient.inactive-and-active PROPERTIES WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+  foreach(design simple unit incremental optimizer sizer fcpc26 map9v3)
+    add_test(NAME gradient.example.${design} COMMAND physical-example-check ${design})
+    set_tests_properties(gradient.example.${design} PROPERTIES WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+  endforeach()
+endif()

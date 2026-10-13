@@ -9,6 +9,7 @@
 namespace ot {
 
 struct GradientContext;
+struct LutDerivatives;
 
 // Enum: LutVar
 enum class LutVar {
@@ -63,7 +64,7 @@ struct Lut {
 
   const LutTemplate* lut_template {nullptr};
   
-  float operator() (float, float, GradientContext* = nullptr) const;
+  float operator() (float, float, GradientContext* = nullptr, LutDerivatives* = nullptr) const;
 
   bool is_scalar() const;
   bool empty() const;

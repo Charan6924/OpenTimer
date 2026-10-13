@@ -6,6 +6,9 @@
 
 namespace ot {
 
+struct CellDelayDerivatives;
+struct ConstraintDerivatives;
+
 enum class TimingSense {
   NON_UNATE = 0,
   POSITIVE_UNATE,
@@ -123,9 +126,9 @@ struct Timing {
   void scale_time(float);
   void scale_capacitance(float);
 
-  std::optional<float> delay(Tran, Tran, float, float, GradientContext* = nullptr) const;
-  std::optional<float> slew(Tran, Tran, float, float, GradientContext* = nullptr) const;
-  std::optional<float> constraint(Tran, Tran, float, float, GradientContext* = nullptr) const;
+  std::optional<float> delay(Tran, Tran, float, float, GradientContext* = nullptr, CellDelayDerivatives* = nullptr) const;
+  std::optional<float> slew(Tran, Tran, float, float, GradientContext* = nullptr, CellDelayDerivatives* = nullptr) const;
+  std::optional<float> constraint(Tran, Tran, float, float, GradientContext* = nullptr, ConstraintDerivatives* = nullptr) const;
 };
 
 std::ostream& operator << (std::ostream&, const Timing&);

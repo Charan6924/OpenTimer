@@ -37,6 +37,7 @@ class Timer {
     
     // Builder
     Timer& set_num_threads(unsigned);
+    size_t num_threads() const;
     Timer& read_celllib(std::filesystem::path, std::optional<Split> = {});
     Timer& read_celllibs(std::filesystem::path, std::optional<Split> = {});
     Timer& read_verilog(std::filesystem::path);
@@ -139,7 +140,7 @@ class Timer {
     mutable std::shared_mutex _mutex;
 
     tf::Taskflow _taskflow;
-    tf::Executor _executor;
+    std::unique_ptr<tf::Executor> _executor {std::make_unique<tf::Executor>()};
 
     int _state {0};
     

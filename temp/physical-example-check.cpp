@@ -175,7 +175,7 @@ int main(int argc, char** argv) {
   std::vector<ot::GradientReport> parallel;
   size_t queries=0;
   for(int mode=0;mode<2;++mode) {
-    if(mode) {timer._executor.~Executor();new(&timer._executor) tf::Executor(1);}
+    if(mode) timer.set_num_threads(1);
     size_t index=0;
     for(double tau:{0.1,0.001,0.000001})
     for(auto objective:{ot::TimingObjective::TNS,ot::TimingObjective::WNS})

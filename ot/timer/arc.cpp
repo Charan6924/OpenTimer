@@ -133,8 +133,7 @@ void Arc::_fprop_delay(GradientContext* context) {
   }
 
   if(context) {
-    std::scoped_lock lock(context->smooth_values_mutex);
-    context->smooth_delays[this] = {};
+    context->smooth_delays[idx()] = {};
   }
 
   std::visit(Functors{
@@ -143,8 +142,7 @@ void Arc::_fprop_delay(GradientContext* context) {
       FOR_EACH_EL_RF(el, rf) {
         _delay[el][rf][rf] = net->_delay(el, rf, _to);
         if(context && _delay[el][rf][rf]) {
-          std::scoped_lock lock(context->smooth_values_mutex);
-          context->smooth_delays[this][el][rf][rf] = *_delay[el][rf][rf];
+          context->smooth_delays[idx()].set(el, rf, rf, *_delay[el][rf][rf]);
         }
       }
     },
@@ -159,10 +157,7 @@ void Arc::_fprop_delay(GradientContext* context) {
           auto smooth_si = context->smooth_slew(&_from, el, frf, true);
           auto smooth_delay = smooth_si
             ? tv[el]->delay(frf, trf, *smooth_si, lc, context) : std::nullopt;
-          std::scoped_lock lock(context->smooth_values_mutex);
-          auto& stored = context->smooth_delays[this][el][frf][trf];
-          stored.reset();
-          if(smooth_delay) stored = *smooth_delay;
+          context->smooth_delays[idx()].set(el, frf, trf, smooth_delay);
         }
         auto ipower = tv[el]->internal_power.power(frf, trf, si, lc);
         _ipower[el][frf][trf] = ipower;

@@ -164,9 +164,9 @@ inline bool Lut::empty() const {
 // function f(x1) = y1 and f(x2) = y2. There are five cases: 1) x < x1, 2) x = x1,
 // 3) x1 < x < x2, 4) x = x2, and 5) x > x2. For cases 1) and 5), extra-polation is needed.
 // Cases 2) and 4) are boundary cases. Case 3) requires the inter-polation.
-float Lut::operator()(float val1, float val2, GradientContext* context) const {
+float Lut::operator()(float val1, float val2, GradientContext* context, LutDerivatives* output) const {
 
-  if(context) {
+  if(context || output) {
     if(!std::isfinite(val1) || !std::isfinite(val2) ||
        std::abs(val1) == std::numeric_limits<float>::max() ||
        std::abs(val2) == std::numeric_limits<float>::max()) {
@@ -226,9 +226,16 @@ float Lut::operator()(float val1, float val2, GradientContext* context) const {
         "LUT table derivative must be finite");
     }
 
-    // Parallel cell tasks can evaluate the same shared library table.
-    std::scoped_lock lock(context->lut_derivatives_mutex);
-    context->lut_derivatives[this][{val1, val2}] = derivatives;
+    if(output) *output = derivatives;
+    if(context) {
+      if(context->record_local_derivatives) {
+        std::scoped_lock lock(context->lut_derivatives_mutex);
+        context->lut_derivatives[this][{val1, val2}] = derivatives;
+      }
+      else if(context->options.collect_lut_gradients) {
+        context->worker_data().used_luts.insert(this);
+      }
+    }
     return static_cast<float>(derivatives.value);
   }
   

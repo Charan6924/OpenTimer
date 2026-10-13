@@ -37,11 +37,10 @@ float RctNode::slew(Split m, Tran t, float si, GradientContext* context) const {
       static_cast<double>(si) / so, "RC input slew derivative must be finite");
     const double dimpulse = GradientContext::require_finite(
       1.0 / (2.0 * so), "RC impulse derivative must be finite");
-    std::scoped_lock lock(context->rc_derivatives_mutex);
-    context->rc_slew_derivatives[this][{m, t, si}] = {
-      dinputslew,
-      dimpulse
-    };
+    if(context->record_local_derivatives) {
+      std::scoped_lock lock(context->rc_derivatives_mutex);
+      context->rc_slew_derivatives[this][{m, t, si}] = {dinputslew, dimpulse};
+    }
   }
   return so;
 }
@@ -445,7 +444,6 @@ void Net::_update_rc_timing(GradientContext* context) {
 
   if(_rc_timing_updated) {
     if(context) {
-      std::scoped_lock lock(context->rc_derivatives_mutex);
       if(auto* rct = std::get_if<Rct>(&_rct)) {
         rct->_build_derivative_cache();
       }

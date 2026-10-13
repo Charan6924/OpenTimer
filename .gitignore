@@ -27,3 +27,10 @@
 *.app
 
 build/
+
+iccad2015.ot/
+/iccad2015.ot
+results/
+ot/config.hpp
+bin/
+/unittest/*-check

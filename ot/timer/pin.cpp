@@ -358,8 +358,7 @@ void Pin::_relax_slew(Arc* arc, Split fel, Tran frf, Split tel, Tran trf, float 
     if(!std::isfinite(tau) || tau <= 0.0) {
       throw std::invalid_argument("slew temperature must be finite and greater than zero");
     }
-    std::scoped_lock lock(context->slew_derivatives_mutex);
-    auto& state = context->smooth_slews[this][tel][trf];
+    auto& state = context->smooth_slews[idx()][tel][trf];
     const double sign = tel == MIN ? -1.0 : 1.0;
     double weight = 1.0;
     if(state.value) {

@@ -7,12 +7,20 @@ namespace ot {
 
 // Function: set_num_threads
 Timer& Timer::set_num_threads(unsigned n) {
+  if(n == 0) throw std::invalid_argument("thread count must be positive");
   std::scoped_lock lock(_mutex);
-  unsigned w = (n == 0) ? 0 : n-1;
-  OT_LOGI("using ", n, " threads (", w, " worker)");
-  // TODO
-  //_taskflow.num_workers(w);
+  if(_executor->num_workers() != n) {
+    auto replacement = std::make_unique<tf::Executor>(n);
+    _executor->wait_for_all();
+    _executor.swap(replacement);
+  }
+  OT_LOGI("using ", _executor->num_workers(), " worker threads");
   return *this;
+}
+
+size_t Timer::num_threads() const {
+  std::shared_lock lock(_mutex);
+  return _executor->num_workers();
 }
 
 // Procedure: _add_to_lineage
@@ -743,8 +751,7 @@ void Timer::_fprop_slew(Pin& pin, GradientContext* context) {
   // clear slew  
   pin._reset_slew();
   if(context) {
-    std::scoped_lock lock(context->slew_derivatives_mutex);
-    context->smooth_slews.erase(&pin);
+    context->smooth_slews[pin.idx()] = {};
   }
 
   // PI
@@ -803,20 +810,14 @@ void Timer::_smooth_fprop_at(Pin& pin, GradientContext& context){
     // Clear old weights and exclude arcs removed from propagation by loop breaking.
     for(auto arc : pin._fanin) {
       auto& weights = context.reduction_weights[arc->idx()];
-      GradientArcData delays {};
-      {
-        std::scoped_lock lock(context.smooth_values_mutex);
-        if(auto found = context.smooth_delays.find(arc); found != context.smooth_delays.end()) {
-          delays = found->second;
-        }
-      }
+      const auto& delays = context.smooth_delays[arc->idx()];
       FOR_EACH_RF(frf) {
-        weights[el][frf][trf].reset();
+        weights.set(el, frf, trf, std::nullopt);
         if(arc->is_loop_breaker()) {
           continue;
         }
         const auto& source = context.smooth_arrivals[arc->_from.idx()][el][frf];
-        const auto& delay = delays[el][frf][trf];
+        const auto delay = delays.get(el, frf, trf);
         if(source && arc->_delay[el][frf][trf] && !delay) {
           throw std::runtime_error("missing smooth arc delay for a timed arrival candidate");
         }
@@ -850,9 +851,8 @@ void Timer::_smooth_fprop_at(Pin& pin, GradientContext& context){
     // Store local derivative for later use
     for(const auto& candidate : candidates) {
       if(candidate.arc) {
-        context.reduction_weights[candidate.arc->idx()][el]
-          [candidate.from_transition][trf] =
-            std::exp((sign * candidate.value - largest) / tau) / sum;
+        context.reduction_weights[candidate.arc->idx()].set(el, candidate.from_transition, trf,
+          std::exp((sign * candidate.value - largest) / tau) / sum);
       }
     }
   }
@@ -898,7 +898,6 @@ void Timer::_seed_gradient_objective(GradientContext& context) {
       const auto tv = test._arc.timing_view();
       std::optional<double> constraint;
       {
-        std::scoped_lock lock(context.smooth_values_mutex);
         if(auto found = context.smooth_constraints.find(&test); found != context.smooth_constraints.end()) {
           constraint = found->second[el][rf];
         }
@@ -963,6 +962,8 @@ void Timer::_seed_gradient_objective(GradientContext& context) {
       ? std::exp((worst - endpoint.slack) / tau) / sum
       : (endpoint.slack < 0.0 ? 1.0 : 0.0);
 
+    if(q == 0.0) continue;
+    context.active_seeds = true;
     const double data_seed = endpoint.split == MIN ? q : -q;
     seed(endpoint.data_pin, endpoint.split, endpoint.transition, data_seed);
     if(endpoint.clock_pin) {
@@ -974,7 +975,17 @@ void Timer::_seed_gradient_objective(GradientContext& context) {
       adjoint = adjoint.value_or(0.0) - q;
     }
   }
-  _gradient_seed_constraints(context);
+  if(context.active_seeds) {
+    context.arc_gradients.resize(_idx2arc.size());
+    context.arc_slew_contributions.resize(_idx2arc.size());
+    context.arc_load_contributions.resize(_idx2arc.size());
+    for(const auto& arc : _arcs) {
+      if(arc.is_net_arc() && std::holds_alternative<Rct>(std::get<Net*>(arc._handle)->_rct)) {
+        context.arc_impulse_contributions.emplace(arc.idx(), GradientArcValues {});
+      }
+    }
+    _gradient_seed_constraints(context);
+  }
   context.report.objective_value = context.objective_value;
 }
 
@@ -1069,7 +1080,7 @@ void Timer::_gradient_bprop_rat(Pin& pin, GradientContext& context){
     for(auto arc : pin._fanout) {
       if(arc->is_loop_breaker()) continue;
       FOR_EACH_RF(trf) {
-        value += context.arc_gradients[arc->idx()][el][frf][trf].value_or(0.0);
+        value += context.arc_gradients[arc->idx()].get(el, frf, trf).value_or(0.0);
       }
     }
     adjoints[el][frf] = GradientContext::require_finite(value, "arrival adjoint must be finite");
@@ -1081,17 +1092,17 @@ void Timer::_gradient_bprop_rat(Pin& pin, GradientContext& context){
     auto& gradients = context.arc_gradients[arc->idx()];
     FOR_EACH_EL_RF_RF(el, frf, trf) {
       if(!arc->_delay[el][frf][trf]) {
-        gradients[el][frf][trf].reset();
+        gradients.set(el, frf, trf, std::nullopt);
         continue;
       }
-      const auto& weight = context.reduction_weights[arc->idx()][el][frf][trf];
+      const auto weight = context.reduction_weights[arc->idx()].get(el, frf, trf);
       if(!arc->is_loop_breaker() && context.smooth_arrivals[arc->_from.idx()][el][frf] &&
          context.smooth_arrivals[pin.idx()][el][trf] && (!weight || !adjoints[el][trf])) {
         throw std::runtime_error("missing reduction weight or adjoint for a timed arc");
       }
-      gradients[el][frf][trf] = !arc->is_loop_breaker() && weight && adjoints[el][trf]
+      const double value = !arc->is_loop_breaker() && weight && adjoints[el][trf]
         ? *weight * *adjoints[el][trf] : 0.0;
-      GradientContext::require_finite(*gradients[el][frf][trf], "arc delay gradient must be finite");
+      gradients.set(el, frf, trf, GradientContext::require_finite(value, "arc delay gradient must be finite"));
     }
   }
 }
@@ -1236,8 +1247,10 @@ void Timer::_build_prop_tasks(GradientContext* gradient_context) {
       pin->_btask = _taskflow.emplace([this, pin, gradient_context] () {
         // Keep exact required times current alongside the gradient state.
         _bprop_rat(*pin);
-        _gradient_bprop_rat(*pin, *gradient_context);
-        _gradient_bprop_models(*pin, *gradient_context);
+        if(gradient_context->active_seeds) {
+          _gradient_bprop_rat(*pin, *gradient_context);
+          _gradient_bprop_models(*pin, *gradient_context);
+        }
       });
 
       objective_task->precede(*pin->_btask);
@@ -1307,7 +1320,7 @@ void Timer::_update_timing(GradientContext* gradient_context) {
   }
 
   // materialize the lineage
-  _executor.run(_taskflow).wait();
+  _executor->run(_taskflow).wait();
   _taskflow.clear();
   _lineage.reset();
 
@@ -1316,11 +1329,13 @@ void Timer::_update_timing(GradientContext* gradient_context) {
     gradient_context->smooth_arrivals.resize(_idx2pin.size());
     gradient_context->pin_adjoints.resize(_idx2pin.size());
     gradient_context->reduction_weights.resize(_idx2arc.size());
-    gradient_context->arc_gradients.resize(_idx2arc.size());
     gradient_context->slew_adjoints.resize(_idx2pin.size());
-    gradient_context->arc_slew_contributions.resize(_idx2arc.size());
-    gradient_context->arc_load_contributions.resize(_idx2arc.size());
-    gradient_context->arc_impulse_contributions.resize(_idx2arc.size());
+    gradient_context->smooth_slews.resize(_idx2pin.size());
+    gradient_context->smooth_delays.resize(_idx2arc.size());
+    gradient_context->record_local_derivatives = false;
+    gradient_context->executor = _executor.get();
+    gradient_context->workers.resize(_executor->num_workers() + 1);
+    for(const auto& test : _tests) gradient_context->smooth_constraints.emplace(&test, GradientPinData {});
   }
 
   if(_has_state(FULL_TIMING)) {
@@ -1339,7 +1354,7 @@ void Timer::_update_timing(GradientContext* gradient_context) {
 
   // Execute the task
   try {
-    auto execution = _executor.run(_taskflow);
+    auto execution = _executor->run(_taskflow);
     if(gradient_context) execution.get();
     else execution.wait();
   }
@@ -1474,7 +1489,7 @@ void Timer::_update_endpoints() {
   }
 
   // run tasks
-  _executor.run(_taskflow).wait();
+  _executor->run(_taskflow).wait();
   _taskflow.clear();
 
   _insert_state(EPTS_UPDATED);
@@ -1886,7 +1901,12 @@ GradientReport Timer::report_gradients(const GradientOptions& options){
     gradient.from_pin = arc.from().name();
     gradient.to_pin = arc.to().name();
     if(context.objective_value) {
-      gradient.value = context.arc_gradients[arc.idx()];
+      FOR_EACH_EL_RF_RF(el, frf, trf) {
+        if(arc._delay[el][frf][trf]) {
+          gradient.value[el][frf][trf] = context.active_seeds
+            ? context.arc_gradients[arc.idx()].get(el, frf, trf) : std::optional<double>{0.0};
+        }
+      }
     }
     context.report.arcs.push_back(std::move(gradient));
   }

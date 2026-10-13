@@ -150,7 +150,31 @@ struct ConstraintDerivatives {
 using GradientPinData = TimingData<std::optional<double>, MAX_SPLIT, MAX_TRAN>;
 using GradientArcData = TimingData<std::optional<double>, MAX_SPLIT, MAX_TRAN, MAX_TRAN>;
 
-// Store forward pass values and local derivatives here
+// Eight arc states share one validity mask. Missing and zero remain distinct.
+struct CompactGradientArcData {
+  std::array<double, MAX_SPLIT * MAX_TRAN * MAX_TRAN> values {};
+  uint8_t valid {0};
+  static size_t index(Split el, Tran frf, Tran trf) {
+    return (size_t(el) * MAX_TRAN + size_t(frf)) * MAX_TRAN + size_t(trf);
+  }
+  std::optional<double> get(Split el, Tran frf, Tran trf) const {
+    const auto i = index(el, frf, trf);
+    return valid & (1u << i) ? std::optional<double>{values[i]} : std::nullopt;
+  }
+  void set(Split el, Tran frf, Tran trf, std::optional<double> value) {
+    const auto i = index(el, frf, trf);
+    if(value) { values[i] = *value; valid |= uint8_t(1u << i); }
+    else valid &= uint8_t(~(1u << i));
+  }
+};
+
+using GradientArcValues = TimingData<double, MAX_SPLIT, MAX_TRAN, MAX_TRAN>;
+struct GradientWorkerData {
+  std::unordered_set<const Lut*> used_luts;
+  std::unordered_map<const Lut*, std::vector<double>> lut_adjoints;
+};
+
+// Store forward values by task owner. Container sizes are fixed before execution.
 struct GradientContext {
   explicit GradientContext(const GradientOptions& o) : options {o} {}
 
@@ -164,34 +188,32 @@ struct GradientContext {
   const GradientOptions& options;
   std::vector<GradientPinData> smooth_arrivals;
   std::vector<GradientPinData> pin_adjoints;
-  std::vector<GradientArcData> reduction_weights;
-  std::vector<GradientArcData> arc_gradients;
+  std::vector<CompactGradientArcData> reduction_weights;
+  std::vector<CompactGradientArcData> arc_gradients;
   std::vector<GradientPinData> slew_adjoints;
-  std::vector<GradientArcData> arc_slew_contributions;
-  std::vector<GradientArcData> arc_load_contributions;
-  std::vector<GradientArcData> arc_impulse_contributions;
+  std::vector<GradientArcValues> arc_slew_contributions;
+  std::vector<GradientArcValues> arc_load_contributions;
+  std::unordered_map<size_t, GradientArcValues> arc_impulse_contributions;
   std::unordered_map<const Test*, GradientPinData> constraint_adjoints;
   std::unordered_map<const Lut*, std::vector<double>> lut_adjoints;
-  std::mutex model_adjoints_mutex;
+  bool active_seeds {false};
+  // Standalone model diagnostics retain their query records. Full timer passes
+  // recompute locals during reverse propagation and never fill those maps.
+  bool record_local_derivatives {true};
+  tf::Executor* executor {nullptr};
+  std::vector<GradientWorkerData> workers;
+  std::unordered_set<const Lut*> used_luts;
+  GradientWorkerData& worker_data() {
+    const int id = executor->this_worker_id();
+    return workers[id < 0 ? workers.size()-1 : size_t(id)];
+  }
   std::optional<double> objective_value;
   GradientReport report;
-  std::unordered_map<const Pin*, TimingData<SmoothSlewState, MAX_SPLIT, MAX_TRAN>> smooth_slews;
-  std::mutex slew_derivatives_mutex;
-  std::unordered_map<const Arc*, GradientArcData> smooth_delays;
+  std::vector<TimingData<SmoothSlewState, MAX_SPLIT, MAX_TRAN>> smooth_slews;
+  std::vector<CompactGradientArcData> smooth_delays;
   std::unordered_map<const Test*, GradientPinData> smooth_constraints;
-  std::mutex smooth_values_mutex;
 
-  std::optional<float> smooth_slew(const Pin* pin, Split el, Tran rf, bool required = false) {
-    std::scoped_lock lock(slew_derivatives_mutex);
-    const auto found = smooth_slews.find(pin);
-    if(found == smooth_slews.end() || !found->second[el][rf].value) {
-      if(required) throw std::runtime_error("missing smooth slew for a timed pin state");
-      return std::nullopt;
-    }
-    const float value = static_cast<float>(*found->second[el][rf].value);
-    require_finite(value, "smooth slew is nonfinite or outside float range");
-    return value;
-  }
+  std::optional<float> smooth_slew(const Pin*, Split, Tran, bool required = false) const;
 
   std::unordered_map<const Rct*, RcTreeGradientData> rc_trees;
   using RcSlewKey = std::tuple<Split, Tran, float>;

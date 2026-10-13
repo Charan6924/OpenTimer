@@ -128,8 +128,7 @@ void Test::_fprop_rat(float period, GradientContext* context) {
       auto constrained = context->smooth_slew(&_arc._to, el, rf, true);
       auto constraint = related && constrained
         ? tv[el]->constraint(frf, rf, *related, *constrained, context) : std::nullopt;
-      std::scoped_lock lock(context->smooth_values_mutex);
-      auto& stored = context->smooth_constraints[this][el][rf];
+      auto& stored = context->smooth_constraints.at(this)[el][rf];
       stored.reset();
       if(constraint) stored = *constraint;
     }
