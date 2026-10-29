@@ -1,5 +1,6 @@
 // Test-only access to Timer's internal forward workspace.
 #include <ot/headerdef.hpp>
+#include <limits>
 #define private public
 #include <ot/timer/gate.hpp>
 #include <ot/timer/pin.hpp>
@@ -96,6 +97,13 @@ int main(int argc, char** argv) {
   std::istringstream observed(actual.str());
   std::string expected_token, actual_token;
   size_t token=0;
+  // The timer keeps delays, slews and arrivals in single precision. The
+  // reference was made with fused multiply-add (the default on ARM, or x86 with
+  // -march=native); a plain x86-64 build rounds those values a few float ulps
+  // differently (up to 5e-7 relative here), so numbers are compared to float
+  // precision. Integers and names must still match exactly, because they
+  // differ by at least 1.
+  const double tolerance=64.0*std::numeric_limits<float>::epsilon();
   while(reference >> expected_token) {
     ++token;
     require(bool(observed >> actual_token), "gradient report is truncated");
@@ -105,7 +113,7 @@ int main(int argc, char** argv) {
     const double value=std::strtod(actual_token.c_str(), &actual_end);
     if(expected_end!=expected_token.c_str() && actual_end!=actual_token.c_str()
        && *expected_end==0 && *actual_end==0 && std::isfinite(expected) && std::isfinite(value)
-       && std::abs(expected-value)<=1e-12*(1.0+std::max(std::abs(expected),std::abs(value)))) continue;
+       && std::abs(expected-value)<=tolerance*(1.0+std::max(std::abs(expected),std::abs(value)))) continue;
     throw std::runtime_error("gradient reference mismatch at token " + std::to_string(token)
       + ": expected " + expected_token + ", got " + actual_token);
   }
