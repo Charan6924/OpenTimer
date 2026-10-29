@@ -23,6 +23,18 @@ size_t Timer::num_threads() const {
   return _executor->num_workers();
 }
 
+// Function: celllib
+const Celllib* Timer::celllib(Split el) const {
+  return _celllib[el] ? &(*_celllib[el]) : nullptr;
+}
+
+// Function: set_preset_clear_arcs
+Timer& Timer::set_preset_clear_arcs(bool enable) {
+  std::scoped_lock lock(_mutex);
+  _preset_clear_arcs = enable;
+  return *this;
+}
+
 // Procedure: _add_to_lineage
 void Timer::_add_to_lineage(tf::Task task) {
   _lineage | [&] (auto& p) { p.precede(task); };
@@ -255,6 +267,11 @@ void Timer::_insert_gate_arcs(Gate& gate) {
       for(const auto& tm : cp.timings) {
 
         if(_is_redundant_timing(tm, el)) {
+          continue;
+        }
+
+        if(!_preset_clear_arcs && tm.type &&
+           (*tm.type == TimingType::PRESET || *tm.type == TimingType::CLEAR)) {
           continue;
         }
 
@@ -943,6 +960,15 @@ void Timer::_seed_gradient_objective(GradientContext& context) {
     for(const auto& endpoint : endpoints) sum += std::exp((worst - endpoint.slack) / tau);
     context.objective_value = worst - tau * std::log(sum);
   }
+  else if(context.options.objective == TimingObjective::SMOOTH_TNS) {
+    // -tau * softplus(-slack / tau), evaluated stably
+    double tns = 0.0;
+    for(const auto& endpoint : endpoints) {
+      const double x = -endpoint.slack / tau;
+      tns -= tau * (std::max(x, 0.0) + std::log1p(std::exp(-std::abs(x))));
+    }
+    context.objective_value = tns;
+  }
   else { // find tns
     double tns = 0.0;
     for(const auto& endpoint : endpoints) tns += std::min(endpoint.slack, 0.0);
@@ -958,9 +984,12 @@ void Timer::_seed_gradient_objective(GradientContext& context) {
   };
 
   for(const auto& endpoint : endpoints) {
-    const double q = context.options.objective == TimingObjective::WNS
-      ? std::exp((worst - endpoint.slack) / tau) / sum
-      : (endpoint.slack < 0.0 ? 1.0 : 0.0);
+    double q = 0.0;
+    switch(context.options.objective) {
+      case TimingObjective::WNS:        q = std::exp((worst - endpoint.slack) / tau) / sum; break;
+      case TimingObjective::SMOOTH_TNS: q = 1.0 / (1.0 + std::exp(endpoint.slack / tau)); break;   // sigmoid(-slack/tau)
+      case TimingObjective::TNS:        q = endpoint.slack < 0.0 ? 1.0 : 0.0; break;
+    }
 
     if(q == 0.0) continue;
     context.active_seeds = true;
@@ -979,6 +1008,7 @@ void Timer::_seed_gradient_objective(GradientContext& context) {
     context.arc_gradients.resize(_idx2arc.size());
     context.arc_slew_contributions.resize(_idx2arc.size());
     context.arc_load_contributions.resize(_idx2arc.size());
+    context.arc_slew_seeds.resize(_idx2arc.size());
     for(const auto& arc : _arcs) {
       if(arc.is_net_arc() && std::holds_alternative<Rct>(std::get<Net*>(arc._handle)->_rct)) {
         context.arc_impulse_contributions.emplace(arc.idx(), GradientArcValues {});
@@ -1905,6 +1935,9 @@ GradientReport Timer::report_gradients(const GradientOptions& options){
         if(arc._delay[el][frf][trf]) {
           gradient.value[el][frf][trf] = context.active_seeds
             ? context.arc_gradients[arc.idx()].get(el, frf, trf) : std::optional<double>{0.0};
+        }
+        if(context.active_seeds) {
+          gradient.slew[el][frf][trf] = context.arc_slew_seeds[arc.idx()].get(el, frf, trf);
         }
       }
     }

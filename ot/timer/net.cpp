@@ -530,6 +530,11 @@ void Net::_insert_pin(Pin& pin) {
   _invalidate_rc_timing();
 }
 
+// Function: load
+float Net::load(Split m, Tran t) const {
+  return _load(m, t);
+}
+
 // Function: _load
 // The total capacitive load is defined as the sum of the input capacitance 
 // of all the other devices sharing the trace.

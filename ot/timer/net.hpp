@@ -166,6 +166,9 @@ class Net {
 
     inline const Rct* rct() const;
 
+    // Load capacitance seen by the driver (valid after a timing update).
+    float load(Split, Tran) const;
+
   private:
 
     std::string _name;

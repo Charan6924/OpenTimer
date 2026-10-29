@@ -37,6 +37,9 @@ class Timer {
     
     // Builder
     Timer& set_num_threads(unsigned);
+    // Time asynchronous preset/clear arcs (e.g. RESET->Q). Default true; OpenSTA
+    // disables them by default. Call before reading the netlist.
+    Timer& set_preset_clear_arcs(bool);
     size_t num_threads() const;
     Timer& read_celllib(std::filesystem::path, std::optional<Split> = {});
     Timer& read_celllibs(std::filesystem::path, std::optional<Split> = {});
@@ -131,6 +134,9 @@ class Timer {
     inline const auto& tests() const;
     inline const auto& arcs() const;
 
+    // The timer's own (unit-rebased) cell library for one split, or nullptr.
+    const Celllib* celllib(Split) const;
+
   private:
 
     using GradientPinData = ot::GradientPinData;
@@ -143,6 +149,8 @@ class Timer {
     std::unique_ptr<tf::Executor> _executor {std::make_unique<tf::Executor>()};
 
     int _state {0};
+
+    bool _preset_clear_arcs {true};
     
     bool _scc_analysis {false};
 

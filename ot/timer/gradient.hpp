@@ -6,8 +6,9 @@
 namespace ot {
 
 enum class TimingObjective {
-  TNS,
-  WNS
+  TNS,          // sum of min(slack, 0); gradient is 0/1 per endpoint
+  WNS,          // soft minimum of slack
+  SMOOTH_TNS    // -tau * sum softplus(-slack / tau); every endpoint gets weight sigmoid(-slack / tau)
 };
 
 enum class TimingArcKind {
@@ -36,6 +37,16 @@ struct ArcDelayGradient {
     MAX_TRAN,
     MAX_TRAN
   > value;
+
+  // Derivative with respect to the output slew this arc produces at its sink
+  // (before the slew merge), for the same split/input/output transitions.
+  // Needed to chain the gradient to cell-model changes such as gate sizing.
+  TimingData<
+    std::optional<double>,
+    MAX_SPLIT,
+    MAX_TRAN,
+    MAX_TRAN
+  > slew;
 };
 
 // Derivatives use the timer's internal units: objective units / parameter units.

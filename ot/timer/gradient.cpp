@@ -90,6 +90,7 @@ void Timer::_gradient_bprop_models(Pin& pin, GradientContext& context) {
           }
         }
       }
+      if(has_slew_candidate) context.arc_slew_seeds[arc->idx()].set(el, frf, trf, slew_seed);
       if(delay_seed == 0.0 && slew_seed == 0.0) continue;
       const bool has_delay = bool(delays.get(el, frf, trf));
       if(!has_delay && !has_slew_candidate) continue;

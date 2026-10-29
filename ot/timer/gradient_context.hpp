@@ -192,6 +192,7 @@ struct GradientContext {
   std::vector<CompactGradientArcData> arc_gradients;
   std::vector<GradientPinData> slew_adjoints;
   std::vector<GradientArcValues> arc_slew_contributions;
+  std::vector<CompactGradientArcData> arc_slew_seeds;   // d objective / d arc output-slew candidate
   std::vector<GradientArcValues> arc_load_contributions;
   std::unordered_map<size_t, GradientArcValues> arc_impulse_contributions;
   std::unordered_map<const Test*, GradientPinData> constraint_adjoints;
