@@ -55,6 +55,34 @@ Timer& Timer::read_celllib(std::filesystem::path path, std::optional<Split> el) 
   return *this;
 }
 
+// Each Lut points at a LutTemplate owned by the library it was parsed from.
+// Point it at the template of the same name in the library that keeps the cell,
+// so the pointer stays valid after the source library is destroyed.
+static void _rebind_lut_templates(Cell& cell, const Celllib& owner) {
+  const auto rebind = [&owner] (std::optional<Lut>& lut) {
+    if(!lut || !lut->lut_template) return;
+    if(auto itr = owner.lut_templates.find(lut->lut_template->name); itr != owner.lut_templates.end()) {
+      lut->lut_template = &itr->second;
+    }
+    else {
+      OT_LOGE("lut template ", std::quoted(lut->lut_template->name), " not found after merge");
+      lut->lut_template = nullptr;
+    }
+  };
+  for(auto& [pname, cellpin] : cell.cellpins) {
+    for(auto& timing : cellpin.timings) {
+      rebind(timing.cell_rise);
+      rebind(timing.cell_fall);
+      rebind(timing.rise_transition);
+      rebind(timing.fall_transition);
+      rebind(timing.rise_constraint);
+      rebind(timing.fall_constraint);
+      rebind(timing.internal_power.rise_power);
+      rebind(timing.internal_power.fall_power);
+    }
+  }
+}
+
 // Procedure: _merge_celllib
 void Timer::_merge_celllib(Celllib& lib, Split el) {
 
@@ -63,18 +91,29 @@ void Timer::_merge_celllib(Celllib& lib, Split el) {
   // initialize a library
   if(!_celllib[el]) {
     _celllib[el] = std::move(lib);
+    // A copied library (read_celllib without a split) still points at the
+    // original's templates; rebind to this library's own copies.
+    for(auto& [cname, cell] : _celllib[el]->cells) {
+      _rebind_lut_templates(cell, *_celllib[el]);
+    }
     OT_LOGI(
-      "added ", to_string(el), " celllib ", std::quoted(_celllib[el]->name), 
+      "added ", to_string(el), " celllib ", std::quoted(_celllib[el]->name),
       " [cells:", _celllib[el]->cells.size(), ']'
     );
   }
   // merge the library
   else {
-    // Merge the lut template
+    // Merge the lut template. unordered_map::merge leaves templates whose
+    // names already exist in the source library, which is destroyed later.
     _celllib[el]->lut_templates.merge(std::move(lib.lut_templates));
-    
+
+    // Rebind the incoming cells to the surviving templates before merging.
+    for(auto& [cname, cell] : lib.cells) {
+      _rebind_lut_templates(cell, *_celllib[el]);
+    }
+
     // Merge the cell
-    _celllib[el]->cells.merge(std::move(lib.cells)); 
+    _celllib[el]->cells.merge(std::move(lib.cells));
     
     OT_LOGI(
       "merged with library ", std::quoted(lib.name), 
