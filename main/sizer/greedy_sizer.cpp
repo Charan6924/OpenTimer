@@ -12,9 +12,9 @@
 //
 // One trial costs an incremental update of the gate's fanout and fanin cones,
 // which on large designs is close to a full timing update (0.1-1 s). Earlier
-// versions recovered area one gate at a time, which is one or two trials per
-// gate in the design and takes days on superblue-size designs; phase 2 is now
-// batched and both phases stop at --time-limit.
+// versions recovered area one gate at a time, one or two trials per gate in the
+// design (about 25 gates per second on vga_lcd, many hours on superblue-size
+// designs). Phase 2 is now batched and both phases stop at --time-limit.
 
 #include "sizer_common.hpp"
 
