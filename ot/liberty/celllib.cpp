@@ -543,6 +543,9 @@ Cellpin Celllib::_extract_cellpin(token_iterator& itr, const token_iterator end)
 
   //std::cout << "  -->" << cellpin.name << std::endl;
 
+  std::vector<InternalPower> pending_power;   // internal power seen before its timing
+  std::set<std::string> used_power;
+
   int stack = 1;
   
   while(stack && ++itr != end) {
@@ -608,39 +611,32 @@ Cellpin Celllib::_extract_cellpin(token_iterator& itr, const token_iterator end)
       OT_LOGF_IF(++itr == end, "can't get the original pin in cellpin ", cellpin.name);
       cellpin.original_pin = *itr;
     }
+    // A pin can have several timing groups with the same related pin (setup and
+    // hold to one clock, or conditional arcs), so every timing group is kept.
+    // Internal power is attached to the timings with the same related pin,
+    // whichever of the two groups comes first.
     else if(*itr == "internal_power") {
       auto ipower = _extract_internal_power(itr, end);
       bool found = false;
       for(auto &t:cellpin.timings) {
         if (t.related_pin != ipower.related_pin)
           continue;
-
         t.internal_power = ipower;
         found = true;
-        break;
       }
       if (!found) {
-        Timing t;
-        t.related_pin    = ipower.related_pin;
-        t.internal_power = ipower;
-        cellpin.timings.emplace_back(t);
+        pending_power.push_back(std::move(ipower));
       }
     }
     else if(*itr == "timing") {
       auto ti = _extract_timing(itr, end);
-      bool found = false;
-      for(auto &t:cellpin.timings) {
-        if (t.related_pin != ti.related_pin)
-          continue;
-        auto ipower_copy = t.internal_power;
-        t = ti;
-        t.internal_power = ipower_copy;
-        found = true;
-        break;
+      for(auto& p : pending_power) {
+        if (p.related_pin == ti.related_pin) {
+          ti.internal_power = p;
+          used_power.insert(p.related_pin);
+        }
       }
-      if (!found) {
-        cellpin.timings.push_back(ti);
-      }
+      cellpin.timings.push_back(std::move(ti));
     }
     else if(*itr == "}") {
       stack--;
@@ -654,6 +650,17 @@ Cellpin Celllib::_extract_cellpin(token_iterator& itr, const token_iterator end)
   
   if(stack != 0 || *itr != "}") {
     OT_LOGF("can't find group brace '}' in cellpin ", cellpin.name);
+  }
+
+  // Internal power related to a pin without any timing arc keeps a power-only
+  // arc, as before. Power without a related pin (input switching power) gets no
+  // arc: such an arc would start at a nonexistent pin "<gate>:".
+  for(auto& p : pending_power) {
+    if(p.related_pin.empty() || used_power.count(p.related_pin)) continue;
+    Timing t;
+    t.related_pin    = p.related_pin;
+    t.internal_power = p;
+    cellpin.timings.push_back(std::move(t));
   }
 
   return cellpin;
