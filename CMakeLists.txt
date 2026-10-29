@@ -377,6 +377,11 @@ target_link_libraries(ot-sizer ${OT_LINK_FLAGS})
 set_target_properties(ot-sizer PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/bin)
 message(STATUS "OpenTimer sizer: ${OT_SIZER}")
 
+# gradient-guided gate sizer
+add_executable(ot-gsizer main/sizer/gradient_sizer.cpp)
+target_link_libraries(ot-gsizer ${OT_LINK_FLAGS})
+set_target_properties(ot-gsizer PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/bin)
+
 
 
 
