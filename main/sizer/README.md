@@ -79,7 +79,7 @@ bin/ot-gsizer $(for f in $L/*.lib; do echo --lib $f; done) \
 
 ## Results
 
-Both sizers ran with default options on a 2-vCPU cloud VM (Intel Xeon, 2.8 GHz). hidden1 (ICCAD 2024) uses all ASAP7 libraries, `--no-preset-clear` and `--time-limit 900`. vga_lcd (TAU 2015, in `benchmark/`) uses its late library, its SPEF and `--time-limit 300`. TNS and WNS are OpenTimer's late (setup) values in ps.
+Both sizers ran with default options. hidden1 (ICCAD 2024) uses all ASAP7 libraries, `--no-preset-clear` and `--time-limit 900`. vga_lcd (TAU 2015, in `benchmark/`) uses its late library, its SPEF and `--time-limit 300`. TNS and WNS are OpenTimer's late (setup) values in ps.
 
 ### Timing
 
