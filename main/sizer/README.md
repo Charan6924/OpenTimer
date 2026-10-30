@@ -45,7 +45,7 @@ The original positional form still works: `bin/ot-sizer <lib> <verilog> <spef|->
 | `--tau <t>` | `ot-gsizer`: smoothing temperature (library time units) | 0.1 × median output slew |
 | `--max-step <n>` | `ot-gsizer`: largest drive-strength step per move | 2 |
 
-Without `--families`, cells are grouped by `cell_footprint`, or by the drive-strength suffix in the name (`NAND2_X2`, `NAND2X2`, `NAND2x1p5_ASAP7_75t_R`). Only cells with identical pin names share a family, because `repower_gate` maps pins by name.
+Without `--families`, cells are grouped by `cell_footprint`, or by the drive-strength suffix in the name (`NAND2_X2`, `NAND2X2`, `NAND2x1p5_ASAP7_75t_R`). Cells that are not in any family are never resized. Only cells with the same pins and the same timing arcs (related pin and timing type) share a family: `repower_gate` maps pins by name, and the arcs keep apart cells with the same pins and different behavior, such as a flip-flop and a latch.
 
 ## How the sizers work
 
@@ -63,7 +63,7 @@ where `s` and `C` are the arc's current input slew and output load. It applies t
 
 ## ICCAD 2024 gate-sizing benchmarks
 
-`scripts/iccad24/prepare.sh` converts the [contest benchmarks](https://github.com/ASU-VDA-Lab/2024_ICCAD_Contest_Gate_Sizing_Benchmark) for OpenTimer: it flattens buses and escaped names in the Verilog, removes input arrival times from `set_false_path -from` ports, and writes the contest's swap rule (same `func_id`) as a family file.
+`scripts/iccad24/prepare.sh` converts the [contest benchmarks](https://github.com/ASU-VDA-Lab/2024_ICCAD_Contest_Gate_Sizing_Benchmark) for OpenTimer: it flattens buses and escaped names in the Verilog, removes input arrival times from `set_false_path -from` ports, and writes the contest's swap rule as a family file. Combinational cells can swap to a cell with the same `func_id`. Sequential cells and macros keep their cells, as the contest requires, so the script leaves them out of the file. It finds them in the Liberty files, because `func_id` alone puts flip-flops and latches with the same pins in one group.
 
 ```
 scripts/iccad24/prepare.sh <benchmark repo> iccad NV_NVDLA_partition_m

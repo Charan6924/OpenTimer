@@ -167,16 +167,27 @@ inline Families build_families(const ot::Timer& timer, const std::string& family
     groups[key].push_back(&cell);
   }
 
+  // Cells of one family need the same pins, because repower_gate remaps pins by
+  // name, and the same timing arcs (related pin and timing type), as OpenSTA's
+  // equivalent cells do. The arcs keep apart cells with the same pins and
+  // different behavior, such as a flip-flop and a latch.
+  using Signature = std::set<std::tuple<std::string, int, std::string, int>>;
   auto signature = [] (const ot::Cell& c) {
-    std::set<std::pair<std::string, int>> s;
-    for(const auto& [pname, pin] : c.cellpins) s.insert({pname, pin.direction ? int(*pin.direction) : -1});
+    Signature s;
+    for(const auto& [pname, pin] : c.cellpins) {
+      const int dir = pin.direction ? int(*pin.direction) : -1;
+      s.insert({pname, dir, "", -2});
+      for(const auto& t : pin.timings) {
+        if(!t.type && !t.cell_rise && !t.cell_fall && !t.rise_constraint && !t.fall_constraint) continue;  // power only
+        s.insert({pname, dir, t.related_pin, t.type ? int(*t.type) : -1});
+      }
+    }
     return s;
   };
 
   Families families;
   for(auto& [key, cells] : groups) {
-    // repower_gate remaps pins by name: keep the largest subset with identical pins.
-    std::map<std::set<std::pair<std::string, int>>, std::vector<const ot::Cell*>> by_pins;
+    std::map<Signature, std::vector<const ot::Cell*>> by_pins;
     for(auto* c : cells) by_pins[signature(*c)].push_back(c);
     for(auto& [sig, members] : by_pins) {
       if(members.size() < 2) continue;

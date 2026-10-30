@@ -7,7 +7,8 @@ REPO=$1; OUT=$2; shift 2
 HERE=$(cd "$(dirname "$0")" && pwd)
 DESIGNS=${@:-$(ls "$REPO/design" | grep -v -e README -e unzip)}
 mkdir -p "$OUT"
-python3 "$HERE/make_families.py" "$REPO/IR_Tables/NV_NVDLA_partition_m/libcell_properties.csv.bz2" "$OUT/asap7_families.txt"
+python3 "$HERE/make_families.py" "$REPO/IR_Tables/NV_NVDLA_partition_m/libcell_properties.csv.bz2" "$OUT/asap7_families.txt" \
+        "$REPO"/platform/ASAP7/lib/*.lib
 for D in $DESIGNS; do
   mkdir -p "$OUT/$D"
   for f in "$REPO/design/$D"/*.bz2; do bzip2 -dc "$f" > "$OUT/$D/$(basename "${f%.bz2}").orig"; done
